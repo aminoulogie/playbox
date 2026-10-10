@@ -28,6 +28,24 @@ struct AddonClient {
         return value.metas
     }
 
+    func meta(baseURL: URL, type: String, id: String) async throws -> MetaPreview {
+        let value: MetaResponse = try await get(
+            baseURL.appendingPathComponent("meta")
+                .appendingPathComponent(type)
+                .appendingPathComponent(id + ".json")
+        )
+        return value.meta
+    }
+
+    func subtitles(baseURL: URL, type: String, id: String) async throws -> [AddonSubtitle] {
+        let value: SubtitleResponse = try await get(
+            baseURL.appendingPathComponent("subtitles")
+                .appendingPathComponent(type)
+                .appendingPathComponent(id + ".json")
+        )
+        return value.subtitles
+    }
+
     func streams(baseURL: URL, type: String, id: String) async throws -> [AddonStream] {
         let value: StreamResponse = try await get(
             baseURL.appendingPathComponent("stream")
