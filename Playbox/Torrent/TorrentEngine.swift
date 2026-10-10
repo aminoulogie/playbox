@@ -24,13 +24,21 @@ final class TorrentEngine: ObservableObject {
         try? FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
     }
 
-    func play(magnetLink raw: String) async {
-        state = .resolving
-        progress = 0.0
+    func play(
+        magnetLink raw: String,
+        fileIndex: Int? = nil,
+        onUpdate: ((EngineState, Double) -> Void)? = nil
+    ) async {
+        update(.resolving, progress: 0.0, onUpdate: onUpdate)
+
         do {
             let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !value.isEmpty else {
-                throw NSError(domain: "TorrentEngine", code: 1, userInfo: [NSLocalizedDescriptionKey: "Empty magnet URL"])
+                throw NSError(
+                    domain: "TorrentEngine",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Empty magnet URL"]
+                )
             }
 
             let session = Session(settings: SessionSettings(
@@ -47,35 +55,50 @@ final class TorrentEngine: ObservableObject {
             currentHandle = handle
 
             try await handle.start()
-            state = .downloading
+            update(.downloading, progress: 0.0, onUpdate: onUpdate)
 
             let info = try await handle.waitForMetadata(timeout: 60)
-            let file = info.files
-                .filter { $0.path.lowercased().hasSuffix(".mp4") || $0.path.lowercased().hasSuffix(".mkv") || $0.path.lowercased().hasSuffix(".m4v") || $0.path.lowercased().hasSuffix(".mov") }
-                .max { $0.length < $1.length }
+            let file = selectVideoFile(from: info.files, preferredIndex: fileIndex)
 
             guard let file else {
-                state = .failed("No supported video file was found in this torrent")
-                progress = 0.0
+                update(
+                    .failed("No supported video file was found in this torrent"),
+                    progress: 0.0,
+                    onUpdate: onUpdate
+                )
                 return
             }
 
             var finished = false
             while !finished {
                 let status = await handle.status()
-                progress = max(0, min(status.progress, 1.0))
-                finished = status.progress >= 1.0 || status.state == .seeding
+                let currentProgress = max(0, min(status.progress, 1.0))
+                finished = currentProgress >= 1.0 || status.state == .seeding
+
+                update(
+                    .downloading,
+                    progress: currentProgress,
+                    onUpdate: onUpdate
+                )
+
                 if !finished {
-                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                    try await Task.sleep(for: .seconds(1))
                 }
             }
 
             let localURL = cacheDirectory.appendingPathComponent(file.path)
-            state = .ready(localURL)
-            progress = 1.0
+            guard FileManager.default.fileExists(atPath: localURL.path) else {
+                update(
+                    .failed("The torrent finished, but the selected video file is missing from the cache"),
+                    progress: 0.0,
+                    onUpdate: onUpdate
+                )
+                return
+            }
+
+            update(.ready(localURL), progress: 1.0, onUpdate: onUpdate)
         } catch {
-            state = .failed(error.localizedDescription)
-            progress = 0.0
+            update(.failed(error.localizedDescription), progress: 0.0, onUpdate: onUpdate)
         }
     }
 
@@ -94,6 +117,42 @@ final class TorrentEngine: ObservableObject {
         currentHandle = nil
         session = nil
         progress = 0.0
+    }
+
+    private func selectVideoFile(
+        from files: [TorrentInfo.FileEntry],
+        preferredIndex: Int?
+    ) -> TorrentInfo.FileEntry? {
+        if let preferredIndex,
+           files.indices.contains(preferredIndex) {
+            let preferred = files[preferredIndex]
+            if Self.isSupportedVideo(preferred.path) {
+                return preferred
+            }
+        }
+
+        return files
+            .filter { Self.isSupportedVideo($0.path) }
+            .max { $0.length < $1.length }
+    }
+
+    private static func isSupportedVideo(_ path: String) -> Bool {
+        switch URL(fileURLWithPath: path).pathExtension.lowercased() {
+        case "mp4", "m4v", "mov", "mkv":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func update(
+        _ nextState: EngineState,
+        progress nextProgress: Double,
+        onUpdate: ((EngineState, Double) -> Void)?
+    ) {
+        state = nextState
+        progress = nextProgress
+        onUpdate?(nextState, nextProgress)
     }
 
     deinit {
