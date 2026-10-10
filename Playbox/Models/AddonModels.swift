@@ -5,9 +5,38 @@ struct AddonManifest: Codable, Identifiable {
     let version: String?
     let name: String
     let description: String?
-    let resources: [String]?
+    // The add-on protocol permits resources as strings or descriptor objects.
+    let resources: [AddonResource]?
     let types: [String]?
     let catalogs: [AddonCatalog]?
+}
+
+enum AddonResource: Codable, Hashable {
+    case name(String)
+    case descriptor(AddonResourceDescriptor)
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let name = try? container.decode(String.self) {
+            self = .name(name)
+        } else {
+            self = .descriptor(try container.decode(AddonResourceDescriptor.self))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .name(let name): try container.encode(name)
+        case .descriptor(let descriptor): try container.encode(descriptor)
+        }
+    }
+}
+
+struct AddonResourceDescriptor: Codable, Hashable {
+    let name: String
+    let types: [String]?
+    let idPrefixes: [String]?
 }
 
 struct AddonCatalog: Codable, Hashable {
