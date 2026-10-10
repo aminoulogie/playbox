@@ -51,10 +51,23 @@ struct MetaPreview: Codable, Identifiable, Hashable {
     let name: String
     let poster: String?
     let description: String?
+    let imdbRating: String?
+    let releaseInfo: String?
 }
 
+struct MetaResponse: Codable { let meta: MetaPreview }
 struct CatalogResponse: Codable { let metas: [MetaPreview] }
 struct StreamResponse: Codable { let streams: [AddonStream] }
+
+struct SubtitleResponse: Codable { let subtitles: [AddonSubtitle] }
+
+struct AddonSubtitle: Codable, Identifiable, Hashable {
+    let id: String?
+    let url: String
+    let lang: String?
+
+    var stableID: String { id ?? url }
+}
 
 struct AddonStream: Codable, Identifiable, Hashable {
     let name: String?
