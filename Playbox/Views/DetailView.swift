@@ -3,6 +3,7 @@ import SwiftUI
 struct DetailView: View {
     @EnvironmentObject private var store: AddonStore
     @EnvironmentObject private var library: LibraryStore
+    @EnvironmentObject private var downloads: DownloadManager
     let item: MetaPreview
 
     @State private var metadata: MetaPreview?
@@ -152,18 +153,25 @@ struct DetailView: View {
             }
 
             ForEach(playableStreams) { stream in
-                Button {
-                    if let url = stream.playableURL { playerURL = PlayableURL(url: url) }
-                } label: {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(stream.quality).font(.headline)
-                            Text(stream.title ?? stream.name ?? "Direct stream").font(.caption).lineLimit(2)
-                            Text(stream.sourceSummary).font(.caption2).foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    Button {
+                        if let url = stream.playableURL { playerURL = PlayableURL(url: url) }
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(stream.quality).font(.headline)
+                                Text(stream.title ?? stream.name ?? "Direct stream").font(.caption).lineLimit(2)
+                                Text(stream.sourceSummary).font(.caption2).foregroundStyle(.secondary)
+                                downloadStatus(for: stream)
+                            }
+                            Spacer()
+                            Image(systemName: "play.circle.fill").font(.title2)
                         }
-                        Spacer()
-                        Image(systemName: "play.circle.fill").font(.title2)
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.borderless)
+
+                    downloadButton(for: stream)
                 }
             }
 
@@ -195,6 +203,94 @@ struct DetailView: View {
             }
         }
     }
+
+    // MARK: - Downloads
+
+    @ViewBuilder private func downloadButton(for stream: AddonStream) -> some View {
+        if let url = stream.playableURL {
+            let job = downloads.jobs[stream.id]
+
+            switch job?.state {
+            case .some(.downloading):
+                Button {
+                    downloads.cancel(id: stream.id)
+                } label: {
+                    ZStack {
+                        ProgressView(value: job?.progress ?? 0)
+                            .progressViewStyle(.circular)
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 8))
+                    }
+                    .frame(width: 30, height: 30)
+                }
+                .buttonStyle(.borderless)
+
+            case .some(.finished(_)):
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(.green)
+
+            case .some(.failed(_)):
+                Button {
+                    downloads.retry(id: stream.id, url: url, name: downloadName(for: stream))
+                } label: {
+                    Image(systemName: "arrow.clockwise.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(.red)
+                }
+                .buttonStyle(.borderless)
+
+            case .none:
+                Button {
+                    downloads.start(id: stream.id, url: url, name: downloadName(for: stream))
+                } label: {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.title2)
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+    }
+
+    @ViewBuilder private func downloadStatus(for stream: AddonStream) -> some View {
+        switch downloads.jobs[stream.id]?.state {
+        case .some(.downloading):
+            let percent = Int((downloads.jobs[stream.id]?.progress ?? 0) * 100)
+            Text("Downloading… \(percent)%")
+                .font(.caption2)
+                .foregroundStyle(.blue)
+
+        case .some(.finished(_)):
+            Text("Saved to Files › Playbox › Downloads")
+                .font(.caption2)
+                .foregroundStyle(.green)
+
+        case .some(.failed(let message)):
+            Text("Download failed: \(message)")
+                .font(.caption2)
+                .foregroundStyle(.red)
+                .lineLimit(2)
+
+        case .none:
+            EmptyView()
+        }
+    }
+
+    private func downloadName(for stream: AddonStream) -> String {
+        var parts = [metadata?.name ?? item.name]
+
+        if let id = selectedEpisodeID,
+           let episode = metadata?.videos?.first(where: { $0.id == id }),
+           let season = episode.season,
+           let number = episode.episode {
+            parts.append("S\(season)E\(number)")
+        }
+
+        parts.append(stream.quality)
+        return parts.joined(separator: " ")
+    }
+
+    // MARK: - Loading
 
     private func seasons(in videos: [MetaVideo]) -> [Int] {
         Array(Set(videos.compactMap(\.season))).sorted()
