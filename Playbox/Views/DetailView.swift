@@ -89,7 +89,6 @@ struct DetailView: View {
                 ForEach(streams) { stream in
                     Button {
                         guard let url = stream.playableURL else { return }
-                        library.markStarted(metadata ?? item)
                         playerURL = PlayableURL(url: url)
                     } label: {
                         VStack(alignment: .leading, spacing: 3) {
@@ -123,17 +122,7 @@ struct DetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task { await loadDetails() }
         .sheet(item: $playerURL) { value in
-            VStack(spacing: 0) {
-                VideoPlayer(url: value.url, play: $isPlaying)
-                    .autoReplay(false)
-                    .mute(false)
-                    .ignoresSafeArea()
-                if let subtitle = selectedSubtitle {
-                    Text("CC: \(subtitle.lang?.uppercased() ?? "Subtitle") selected")
-                        .font(.caption)
-                        .padding(8)
-                }
-            }
+            TrackedPlayerView(url: value.url, item: metadata ?? item)
         }
     }
 
