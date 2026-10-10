@@ -17,6 +17,7 @@ final class TorrentEngine: ObservableObject {
 
     private var session: Session?
     private var currentHandle: TorrentHandle?
+    private var dhtDiscoveryTask: Task<Int, Never>?
     private let cacheDirectory: URL
 
     init() {
@@ -41,19 +42,26 @@ final class TorrentEngine: ObservableObject {
                 throw EngineError.message("Empty magnet URL")
             }
 
-            // SwiftTorrent's current DHT node is not connected to TorrentHandle peer
-            // discovery. Disable it here to avoid binding a second fixed UDP port;
-            // tracker URLs from the Stremio stream are the active peer source.
+            // Use an ephemeral UDP port for DHT so repeated Play/Stop cycles do not
+            // collide on a fixed socket. Tracker discovery remains active in parallel.
             let session = Session(settings: SessionSettings(
                 listenPort: 6881,
-                dhtEnabled: false,
+                dhtEnabled: true,
+                dhtPort: 0,
                 savePath: cacheDirectory.path
             ))
             self.session = session
 
+            try await session.startDHT()
+
             let params = try AddTorrentParams.fromMagnet(value, savePath: cacheDirectory.path)
             let handle = try await session.addTorrent(params)
             currentHandle = handle
+
+            let infoHash = await handle.infoHash
+            dhtDiscoveryTask = Task {
+                await session.discoverPeers(for: infoHash)
+            }
 
             try await handle.start()
 
@@ -145,6 +153,9 @@ final class TorrentEngine: ObservableObject {
     }
 
     private func shutdownSession() async {
+        dhtDiscoveryTask?.cancel()
+        dhtDiscoveryTask = nil
+
         if let handle = currentHandle, let session {
             await session.removeTorrent(await handle.infoHash, deleteFiles: false)
         }
