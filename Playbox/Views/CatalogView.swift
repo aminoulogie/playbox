@@ -11,6 +11,8 @@ struct CatalogView: View {
     @State private var sections: [CatalogSection] = []
     @State private var loading = false
     @State private var errorMessage: String?
+    @State private var searchText = ""
+    @State private var searchResults: [MetaPreview] = []
 
     // Cinemeta is Stremio's official public movie/series catalog provider.
     // Stream-only add-ons remain independent of catalog discovery.
@@ -72,8 +74,29 @@ struct CatalogView: View {
         }
         .overlay { if loading && sections.isEmpty { ProgressView() } }
         .navigationTitle("Discover")
+        .searchable(text: $searchText, prompt: "Search movies and series")
+        .onSubmit(of: .search) { Task { await search() } }
         .navigationDestination(for: MetaPreview.self) { DetailView(item: $0) }
         .task { await load() }
+    }
+
+    private func search() async {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+        loading = true
+        defer { loading = false }
+
+        async let movies = try? AddonClient().search(
+            baseURL: cinemeta, type: "movie", query: query
+        )
+        async let series = try? AddonClient().search(
+            baseURL: cinemeta, type: "series", query: query
+        )
+        let combined = (await movies ?? []) + (await series ?? [])
+        sections = combined.isEmpty ? [] : [
+            CatalogSection(id: "search", title: "Search Results", items: combined)
+        ]
+        errorMessage = combined.isEmpty ? "No matching movies or series were found." : nil
     }
 
     private func load() async {
