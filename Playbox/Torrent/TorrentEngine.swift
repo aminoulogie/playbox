@@ -32,6 +32,7 @@ final class TorrentEngine: ObservableObject {
     func play(
         magnetLink raw: String,
         fileIndex: Int? = nil,
+        streaming: Bool = false,
         onUpdate: ((EngineState, Double, Int, String) -> Void)? = nil
     ) async {
         await stopCurrentJob()
@@ -98,6 +99,8 @@ final class TorrentEngine: ObservableObject {
 
             try await withTaskCancellationHandler {
                 var metadataWaitTicks = 0
+                var didSignalStreamingReady = false
+                var streamingURL: URL?
 
                 for try await event in events {
                     try Task.checkCancellation()
@@ -129,11 +132,45 @@ final class TorrentEngine: ObservableObject {
                             }
                         }
 
-                        publish(
-                            snapshot,
-                            resolving: !hasMetadata,
-                            onUpdate: onUpdate
-                        )
+                        if streaming,
+                           hasMetadata,
+                           let file = selectedVideoFile(in: snapshot.files) {
+                            let localURL = cacheDirectory.appendingPathComponent(file.path)
+                            let requiredBuffer = min(
+                                file.sizeBytes ?? Self.streamingBufferBytes,
+                                Self.streamingBufferBytes
+                            )
+
+                            if !didSignalStreamingReady,
+                               file.bytesCompleted >= requiredBuffer,
+                               FileManager.default.fileExists(atPath: localURL.path) {
+                                didSignalStreamingReady = true
+                                streamingURL = localURL
+                            }
+                        }
+
+                        if let streamingURL, didSignalStreamingReady {
+                            let fileProgress = selectedVideoFile(in: snapshot.files)
+                                .flatMap(\.percentComplete)
+                                .map { max(0, min($0 / 100.0, 1)) }
+                                ?? 0
+                            update(
+                                .ready(streamingURL),
+                                progress: fileProgress,
+                                peers: snapshot.peerCount
+                                    ?? snapshot.swarmDiagnostics?.connectedPeers
+                                    ?? 0,
+                                diagnostics: diagnostics(for: snapshot)
+                                    + " · VLC buffer ready",
+                                onUpdate: onUpdate
+                            )
+                        } else {
+                            publish(
+                                snapshot,
+                                resolving: !hasMetadata,
+                                onUpdate: onUpdate
+                            )
+                        }
 
                     case .completed(let snapshot):
                         try await ensureValidFileSelection(
@@ -163,7 +200,8 @@ final class TorrentEngine: ObservableObject {
                             .ready(localURL),
                             progress: 1,
                             peers: snapshot.peerCount ?? 0,
-                            diagnostics: finalDiagnostics,
+                            diagnostics: finalDiagnostics
+                                + (streaming ? " · VLC file complete" : ""),
                             onUpdate: onUpdate
                         )
                         return
@@ -342,6 +380,8 @@ final class TorrentEngine: ObservableObject {
         diagnosticText = diagnostics
         onUpdate?(nextState, nextProgress, peers, diagnostics)
     }
+
+    private static let streamingBufferBytes: Int64 = 32 * 1024 * 1024
 
     private static func isSupportedVideo(_ path: String) -> Bool {
         switch URL(fileURLWithPath: path).pathExtension.lowercased() {
