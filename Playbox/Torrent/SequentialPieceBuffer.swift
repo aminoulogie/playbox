@@ -20,7 +20,7 @@ actor SequentialPieceBuffer {
     }
 
     func nextPieces(limit: Int = 8) -> [Int] {
-        Array(plan.orderedPieces.lazy.filter { !verified.contains($0) }.prefix(max(1, limit)))
+        Array(plan.orderedPieces.lazy.filter { !self.verified.contains($0) }.prefix(max(1, limit)))
     }
 
     func markVerified(_ index: Int) {
