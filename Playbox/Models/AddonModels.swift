@@ -108,7 +108,7 @@ struct AddonStream: Codable, Identifiable, Hashable {
 
     var playbackStatus: String {
         if playableURL != nil { return "Direct stream · Tap to play" }
-        if isTorrent { return "Torrent source · Tap to download and play" }
+        if isTorrent { return "Torrent source · Play or download" }
         return "Unsupported stream URL"
     }
 
