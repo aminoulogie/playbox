@@ -1,0 +1,44 @@
+name: Feature Build
+
+on:
+  push:
+    branches:
+      - feature/direct-stream-downloads
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec project.yml
+
+      - name: Build unsigned iOS app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Playbox.xcodeproj \
+            -scheme Playbox \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            MARKETING_VERSION="1.0" \
+            CURRENT_PROJECT_VERSION="1" \
+            INFOPLIST_KEY_CFBundleShortVersionString="1.0" \
+            INFOPLIST_KEY_CFBundleVersion="1" \
+            build
