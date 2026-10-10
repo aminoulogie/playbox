@@ -12,6 +12,8 @@ struct DetailView: View {
     @State private var playerURL: PlayableURL?
     @State private var selectedSeason = 1
     @State private var showUnsupported = false
+    @State private var selectedEpisodeID: String?
+    @State private var isLoadingSources = false
     private let cinemeta = URL(string: "https://v3-cinemeta.strem.io")!
 
     var body: some View {
@@ -71,11 +73,41 @@ struct DetailView: View {
                 Picker("Season", selection: $selectedSeason) {
                     ForEach(seasons(in: videos), id: \.self) { season in Text("Season \(season)").tag(season) }
                 }
+                .onChange(of: selectedSeason) {
+                    selectedEpisodeID = nil
+                    streams = []
+                    subtitles = []
+                }
+
                 ForEach(episodes(in: videos)) { episode in
                     Button {
+                        selectedEpisodeID = episode.id
                         Task { await loadMedia(id: episode.id) }
                     } label: {
-                        Text("E\(episode.episode ?? 0) · \(episode.title ?? "Episode")")
+                        HStack(spacing: 12) {
+                            AsyncImage(url: episode.thumbnail.flatMap(URL.init(string:))) { image in
+                                image.resizable().scaledToFill()
+                            } placeholder: {
+                                ZStack { Rectangle().fill(.gray.opacity(0.18)); Image(systemName: "tv") }
+                            }
+                            .frame(width: 120, height: 68).clipped()
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("E\(episode.episode ?? 0) · \(episode.title ?? "Episode")")
+                                    .font(.headline).lineLimit(2)
+                                HStack(spacing: 8) {
+                                    if let runtime = episode.runtime { Label(runtime, systemImage: "clock") }
+                                    if let released = episode.released { Text(String(released.prefix(10))) }
+                                }
+                                .font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if selectedEpisodeID == episode.id {
+                                if isLoadingSources { ProgressView() } else { Image(systemName: "checkmark.circle.fill") }
+                            }
+                        }
+                        .padding(.vertical, 4)
                     }
                 }
             }
@@ -99,8 +131,12 @@ struct DetailView: View {
     private var unsupportedStreams: [AddonStream] { streams.filter { $0.playableURL == nil } }
 
     private var sources: some View {
-        Section("Play") {
-            if streams.isEmpty {
+        Section(selectedEpisodeID == nil && item.type == "series" ? "Sources" : "Play") {
+            if item.type == "series" && selectedEpisodeID == nil {
+                ContentUnavailableView("Choose an episode", systemImage: "rectangle.stack", description: Text("Select an episode above to find its available sources."))
+            } else if isLoadingSources {
+                HStack { Spacer(); ProgressView("Finding sources…"); Spacer() }
+            } else if streams.isEmpty {
                 ContentUnavailableView("No sources", systemImage: "play.slash", description: Text("No installed add-on returned a source for this title."))
             } else if playableStreams.isEmpty {
                 ContentUnavailableView("No direct stream available", systemImage: "play.slash", description: Text("\(unsupportedStreams.count) source(s) were found, but they are torrent/magnet or otherwise unsupported by the iOS player."))
@@ -122,7 +158,7 @@ struct DetailView: View {
                 }
             }
 
-            if !unsupportedStreams.isEmpty {
+            if !(item.type == "series" && selectedEpisodeID == nil) && !unsupportedStreams.isEmpty {
                 DisclosureGroup("Unavailable sources (\(unsupportedStreams.count))", isExpanded: $showUnsupported) {
                     ForEach(unsupportedStreams) { stream in
                         VStack(alignment: .leading, spacing: 3) {
@@ -147,12 +183,19 @@ struct DetailView: View {
         metadata = try? await AddonClient().meta(baseURL: cinemeta, type: item.type, id: item.id)
         if item.type == "series", let videos = metadata?.videos, let firstSeason = seasons(in: videos).first {
             selectedSeason = firstSeason
-            if let firstEpisode = episodes(in: videos).first { await loadMedia(id: firstEpisode.id); return }
+            selectedEpisodeID = nil
+            streams = []
+            subtitles = []
+            return
         }
         await loadMedia(id: item.id)
     }
 
     private func loadMedia(id: String) async {
+        isLoadingSources = true
+        streams = []
+        subtitles = []
+        defer { isLoadingSources = false }
         var foundStreams: [AddonStream] = []
         var foundSubtitles: [AddonSubtitle] = []
         await withTaskGroup(of: ([AddonStream], [AddonSubtitle]).self) { group in
