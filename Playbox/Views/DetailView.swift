@@ -48,7 +48,11 @@ struct DetailView: View {
         .navigationTitle(item.name)
         .navigationBarTitleDisplayMode(.inline)
         .task { await loadDetails() }
-        .sheet(item: $playerURL) { value in
+        .sheet(item: $playerURL, onDismiss: {
+            if activeTorrentAction == .play {
+                cancelActiveTorrent()
+            }
+        }) { value in
             TrackedPlayerView(url: value.url, item: metadata ?? item)
         }
         .onDisappear {
@@ -490,24 +494,32 @@ struct DetailView: View {
         operationID: UUID,
         engine: TorrentEngine
     ) async {
+        var didOpenPlayer = false
+
         await engine.play(
             magnetLink: magnetURL,
-            fileIndex: stream.fileIdx
+            fileIndex: stream.fileIdx,
+            streaming: action == .play
         ) { state, progress, peers, diagnostics in
             guard torrentOperationID == operationID else { return }
             torrentState = state
             torrentProgress = progress
             torrentPeerCount = peers
             torrentDiagnosticText = diagnostics
+
+            if action == .play,
+               !didOpenPlayer,
+               case .ready(let url) = state {
+                didOpenPlayer = true
+                playerURL = PlayableURL(url: url)
+            }
         }
 
         guard torrentOperationID == operationID, !Task.isCancelled else { return }
 
         switch torrentState {
         case .ready(let url):
-            if action == .play {
-                playerURL = PlayableURL(url: url)
-            } else {
+            if action == .download {
                 do {
                     let destination = try saveTorrentDownload(
                         from: url,
@@ -517,6 +529,9 @@ struct DetailView: View {
                 } catch {
                     torrentErrors[stream.id] = "Could not save torrent: \(error.localizedDescription)"
                 }
+            } else if !didOpenPlayer {
+                didOpenPlayer = true
+                playerURL = PlayableURL(url: url)
             }
 
         case .failed(let message):
@@ -526,7 +541,12 @@ struct DetailView: View {
             break
         }
 
-        finishTorrentOperation(operationID)
+        // Keep the libtorrent engine retained while VLC is playing a growing file.
+        // The sheet onDismiss handler cancels the active torrent. A completed file
+        // no longer needs the engine and can be cleaned up normally.
+        if action == .download || torrentProgress >= 1.0 || playerURL == nil {
+            finishTorrentOperation(operationID)
+        }
     }
 
     @MainActor
