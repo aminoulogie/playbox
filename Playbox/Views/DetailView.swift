@@ -16,7 +16,8 @@ struct DetailView: View {
     private let cinemeta = URL(string: "https://v3-cinemeta.strem.io")!
 
     var body: some View {
-        List {
+        detailList
+
             Section {
                 HStack(alignment: .top, spacing: 16) {
                     AsyncImage(url: (metadata?.poster ?? item.poster).flatMap(URL.init(string:))) { image in
@@ -108,9 +109,7 @@ struct DetailView: View {
                     }
                     .disabled(stream.playableURL == nil)
                 }
-            }
-        }
-        .toolbar {
+            }        .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { library.toggle(metadata ?? item) } label: {
                     Image(systemName: library.contains(metadata ?? item) ? "bookmark.fill" : "bookmark")
@@ -122,6 +121,59 @@ struct DetailView: View {
         .task { await loadDetails() }
         .sheet(item: $playerURL) { value in
             TrackedPlayerView(url: value.url, item: metadata ?? item)
+        }
+    }
+
+    private var detailList: some View {
+        List {
+            headerSection
+            if let description = metadata?.description ?? item.description {
+                Section("About") { Text(description) }
+            }
+            episodeSection
+            subtitleSection
+            playSection
+        }
+    }
+
+    private var headerSection: some View {
+        Section {
+            HStack(alignment: .top, spacing: 16) {
+                AsyncImage(url: (metadata?.poster ?? item.poster).flatMap(URL.init(string:))) { image in image.resizable().scaledToFill() } placeholder: { Rectangle().fill(.gray.opacity(0.2)) }
+                    .frame(width: 110, height: 165).clipped().clipShape(RoundedRectangle(cornerRadius: 10))
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(metadata?.name ?? item.name).font(.title2.bold())
+                    if let rating = metadata?.imdbRating ?? item.imdbRating { Label("\(rating)/10 IMDb", systemImage: "star.fill").font(.subheadline) }
+                    if let release = metadata?.releaseInfo ?? item.releaseInfo { Text(release).font(.subheadline).foregroundStyle(.secondary) }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var episodeSection: some View {
+        if item.type == "series", let videos = metadata?.videos, !videos.isEmpty {
+            let seasons = Array(Set(videos.compactMap(\.season))).sorted()
+            Section("Episodes") {
+                Picker("Season", selection: $selectedSeason) { ForEach(seasons, id: \.self) { Text("Season \($0)").tag($0) } }
+                ForEach(videos.filter { $0.season == selectedSeason }.sorted { ($0.episode ?? 0) < ($1.episode ?? 0) }) { episode in
+                    Button { Task { await loadMedia(id: episode.id) } } label: { Text("E\(episode.episode ?? 0) · \(episode.title ?? "Episode")") }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var subtitleSection: some View {
+        if !subtitles.isEmpty { Section("CC / Subtitles") { Picker("Subtitle", selection: $selectedSubtitle) { Text("Off").tag(nil as AddonSubtitle?); ForEach(subtitles, id: \.stableID) { Text($0.lang?.uppercased() ?? "CC").tag($0 as AddonSubtitle?) } } } }
+    }
+
+    private var playSection: some View {
+        Section("Play") {
+            if streams.isEmpty { Text("No playable sources returned.").foregroundStyle(.secondary) }
+            ForEach(streams) { stream in
+                Button { if let url = stream.playableURL { playerURL = PlayableURL(url: url) } } label: {
+                    VStack(alignment: .leading, spacing: 3) { Text(stream.quality).font(.headline); Text(stream.title ?? stream.name ?? "Source").font(.caption).lineLimit(2); Text(stream.sourceSummary).font(.caption2).foregroundStyle(.secondary) }
+                }.disabled(stream.playableURL == nil)
+            }
         }
     }
 
