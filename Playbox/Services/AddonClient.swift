@@ -28,6 +28,19 @@ struct AddonClient {
         return value.metas
     }
 
+    func search(baseURL: URL, type: String, catalogID: String = "top", query: String) async throws -> [MetaPreview] {
+        var components = URLComponents(
+            url: baseURL.appendingPathComponent("catalog")
+                .appendingPathComponent(type)
+                .appendingPathComponent(catalogID)
+                .appendingPathComponent("search=" + query + ".json"),
+            resolvingAgainstBaseURL: false
+        )
+        guard let url = components?.url else { throw AddonError.invalidURL }
+        let value: CatalogResponse = try await get(url)
+        return value.metas
+    }
+
     func meta(baseURL: URL, type: String, id: String) async throws -> MetaPreview {
         let value: MetaResponse = try await get(
             baseURL.appendingPathComponent("meta")
