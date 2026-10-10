@@ -2,6 +2,11 @@ name: Build iOS IPA
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, for example 1.0.72. Leave blank for automatic versioning."
+        required: false
+        type: string
   push:
     branches: [main]
     paths:
@@ -23,6 +28,26 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
+
+      - name: Resolve release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          INPUT_VERSION="${{ inputs.version }}"
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION="${INPUT_VERSION#v}"
+          else
+            VERSION="1.0.${GITHUB_RUN_NUMBER}"
+          fi
+
+          if [[ ! "$VERSION" =~ ^[0-9]+([.][0-9]+){1,2}$ ]]; then
+            echo "Invalid release version: $VERSION"
+            echo "Use a numeric version such as 1.0.72."
+            exit 1
+          fi
+
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Resolved release version: $VERSION"
 
       - name: Show Xcode version
         run: xcodebuild -version
@@ -46,10 +71,6 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate --spec project.yml
 
-      - name: Stamp app version
-        run: |
-          /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0" Playbox.xcodeproj/project.pbxproj 2>/dev/null || true
-
       - name: Build for physical iPhone (unsigned)
         run: |
           set -o pipefail
@@ -63,9 +84,9 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            MARKETING_VERSION="1.0.${{ github.run_number }}" \
+            MARKETING_VERSION="$VERSION" \
             CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
-            INFOPLIST_KEY_CFBundleShortVersionString="1.0.${{ github.run_number }}" \
+            INFOPLIST_KEY_CFBundleShortVersionString="$VERSION" \
             INFOPLIST_KEY_CFBundleVersion="${{ github.run_number }}" \
             build
 
@@ -84,40 +105,42 @@ jobs:
           test -d "$APP"
           mkdir -p "$RUNNER_TEMP/package/Payload"
           cp -R "$APP" "$RUNNER_TEMP/package/Payload/"
-          VERSION="1.0.${GITHUB_RUN_NUMBER}"
           (cd "$RUNNER_TEMP/package" && zip -qry "$GITHUB_WORKSPACE/Playbox-v${VERSION}.ipa" Payload)
           cp "$GITHUB_WORKSPACE/Playbox-v${VERSION}.ipa" "$GITHUB_WORKSPACE/Playbox-latest.ipa"
           /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist"
           /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist"
-          ls -lh Playbox-v1.0.${GITHUB_RUN_NUMBER}.ipa
+          ls -lh "Playbox-v${VERSION}.ipa"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: Playbox-unsigned-IPA
-          path: Playbox-v1.0.${{ github.run_number }}.ipa
+          path: Playbox-v*.ipa
           if-no-files-found: error
           retention-days: 30
 
-      - name: Create GitHub Release
+      - name: Create versioned GitHub Release
         if: success()
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: Playbox v1.0.${{ github.run_number }}
-          body: |
-            Automated Playbox iOS build from commit ${{ github.sha }}.
-            Torrent backend: libtorrent 2.0.13.
-            This IPA is unsigned and requires valid Apple signing before normal iPhone installation.
-          files: Playbox-v1.0.${{ github.run_number }}.ipa
-          fail_on_unmatched_files: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "v${VERSION}" "Playbox-v${VERSION}.ipa" \
+            --target "${GITHUB_SHA}" \
+            --title "Playbox v${VERSION}" \
+            --notes "Automated Playbox iOS Release build. Version ${VERSION}. libtorrent 2.0.13 backend. Commit: ${GITHUB_SHA}."
 
       - name: Update stable latest release
         if: success()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release delete "$(gh release list --limit 100 | awk '/Latest/{print $3; exit}')" --cleanup-tag -y 2>/dev/null || true
-          gh release create "v1.0.${GITHUB_RUN_NUMBER}-latest" Playbox-latest.ipa \
-            --title "Playbox v1.0.${GITHUB_RUN_NUMBER} — Latest" \
-            --notes "Version 1.0.${GITHUB_RUN_NUMBER}. libtorrent 2.0.13 backend. Commit: ${GITHUB_SHA}."
+          set -euo pipefail
+          LATEST_TAG="$(gh release list --limit 100 --json tagName,name --jq '.[] | select(.name | contains("Latest")) | .tagName' | head -n 1)"
+          if [ -n "$LATEST_TAG" ]; then
+            gh release delete "$LATEST_TAG" --cleanup-tag -y
+          fi
+          gh release create "v${VERSION}-latest" Playbox-latest.ipa \
+            --target "${GITHUB_SHA}" \
+            --title "Playbox v${VERSION} — Latest" \
+            --notes "Latest stable Playbox IPA. Version ${VERSION}. libtorrent 2.0.13 backend. Commit: ${GITHUB_SHA}."
