@@ -25,6 +25,7 @@ def main() -> None:
     http_tracker = root / "Sources/SwiftTorrent/Tracker/HTTPTracker.swift"
     tracker_manager = root / "Sources/SwiftTorrent/Tracker/TrackerManager.swift"
     peer_connection = root / "Sources/SwiftTorrent/Peer/PeerConnection.swift"
+    peer_manager = root / "Sources/SwiftTorrent/Peer/PeerManager.swift"
     torrent_handle = root / "Sources/SwiftTorrent/Session/TorrentHandle.swift"
     session = root / "Sources/SwiftTorrent/Session/Session.swift"
     dht_node = root / "Sources/SwiftTorrent/DHT/DHTNode.swift"
@@ -343,6 +344,334 @@ def main() -> None:
     }
 ''',
         "stop DHT before session shutdown",
+    )
+
+
+    replace_exact(
+        torrent_handle,
+        '''            let left = info?.totalSize ?? 0
+            let params = AnnounceParams(
+                infoHash: infoHash, peerID: peerID, port: 6881,
+                left: left - totalDownloaded, event: "started"
+            )
+''',
+        '''            // Before magnet metadata arrives, total size is unknown. Do not
+            // announce left=0 because trackers interpret that as "already seeding"
+            // and may return only leechers instead of the seeders needed for metadata.
+            let left = info?.totalSize ?? 1
+            let params = AnnounceParams(
+                infoHash: infoHash, peerID: peerID, port: 6881,
+                left: max(left - totalDownloaded, 1), event: "started"
+            )
+''',
+        "announce metadata-less magnets as incomplete",
+    )
+
+    replace_exact(
+        dht_node,
+        '''    public func sendAndWait(_ msg: DHTMessage, to address: String, port: UInt16, timeout: Duration = .seconds(5)) async throws -> DHTMessage {
+        guard case .query(let txID, _, _) = msg else {
+            throw DHTMessageError.invalidMessage
+        }
+        try await sendMessage(msg, to: address, port: port)
+
+        return try await withCheckedThrowingContinuation { continuation in
+            self.pendingQueries[txID] = continuation
+
+            Task {
+                try? await Task.sleep(for: timeout)
+                if let cont = self.pendingQueries.removeValue(forKey: txID) {
+                    cont.resume(throwing: DHTMessageError.invalidMessage)
+                }
+            }
+        }
+    }
+''',
+        '''    public func sendAndWait(_ msg: DHTMessage, to address: String, port: UInt16, timeout: Duration = .seconds(5)) async throws -> DHTMessage {
+        guard case .query(let txID, _, _) = msg else {
+            throw DHTMessageError.invalidMessage
+        }
+
+        // Register the waiter before writing the datagram. The old order sent the
+        // query first, so a fast UDP reply could arrive before pendingQueries had
+        // an entry and be silently discarded.
+        return try await withCheckedThrowingContinuation { continuation in
+            self.pendingQueries[txID] = continuation
+
+            Task {
+                do {
+                    try await self.sendMessage(msg, to: address, port: port)
+                } catch {
+                    if let cont = await self.removePendingQuery(txID) {
+                        cont.resume(throwing: error)
+                    }
+                    return
+                }
+
+                try? await Task.sleep(for: timeout)
+                if let cont = await self.removePendingQuery(txID) {
+                    cont.resume(throwing: DHTMessageError.invalidMessage)
+                }
+            }
+        }
+    }
+
+    private func removePendingQuery(_ txID: Data) -> CheckedContinuation<DHTMessage, Error>? {
+        pendingQueries.removeValue(forKey: txID)
+    }
+''',
+        "register DHT response waiter before sending",
+    )
+
+    replace_exact(
+        peer_manager,
+        '''/// Manages the pool of peer connections for a torrent.
+public actor PeerManager {
+''',
+        '''public struct PeerConnectionDiagnostics: Sendable {
+    public let active: Int
+    public let connected: Int
+    public let attempts: Int
+    public let failures: Int
+}
+
+/// Manages the pool of peer connections for a torrent.
+public actor PeerManager {
+''',
+        "add peer connection diagnostics type",
+    )
+
+    replace_exact(
+        peer_manager,
+        '''    private let maxConnections: Int
+
+    public var pieceManager: PieceManager?
+''',
+        '''    private let maxConnections: Int
+    private var totalConnectionAttempts: Int = 0
+    private var totalConnectionFailures: Int = 0
+
+    public var pieceManager: PieceManager?
+''',
+        "track peer connection attempts",
+    )
+
+    replace_exact(
+        peer_manager,
+        '''        guard connections.count < maxConnections else { return }
+
+        let conn = PeerConnection(address: address, port: port, infoHash: infoHash, peerID: peerID)
+''',
+        '''        guard connections.count < maxConnections else { return }
+
+        totalConnectionAttempts += 1
+        let conn = PeerConnection(address: address, port: port, infoHash: infoHash, peerID: peerID)
+''',
+        "count peer connection attempts",
+    )
+
+    replace_exact(
+        peer_manager,
+        '''            } catch {
+                await self.removePeerByKey(key)
+            }
+''',
+        '''            } catch {
+                await self.recordConnectionFailure()
+                await self.removePeerByKey(key)
+            }
+''',
+        "count peer connection failures",
+    )
+
+    replace_exact(
+        peer_manager,
+        '''    private func removePeerByKey(_ key: String) {
+        connections.removeValue(forKey: key)
+''',
+        '''    private func recordConnectionFailure() {
+        totalConnectionFailures += 1
+    }
+
+    private func removePeerByKey(_ key: String) {
+        connections.removeValue(forKey: key)
+''',
+        "record peer connection failures",
+    )
+
+    replace_exact(
+        peer_manager,
+        '''    /// Number of active connections.
+    public var connectionCount: Int {
+        connections.count
+    }
+
+    /// Number of peers that completed the TCP handshake.
+''',
+        '''    public func diagnostics() -> PeerConnectionDiagnostics {
+        PeerConnectionDiagnostics(
+            active: connections.count,
+            connected: connectedPeers.count,
+            attempts: totalConnectionAttempts,
+            failures: totalConnectionFailures
+        )
+    }
+
+    /// Number of active connections.
+    public var connectionCount: Int {
+        connections.count
+    }
+
+    /// Number of peers that completed the TCP handshake.
+''',
+        "expose peer connection diagnostics",
+    )
+
+    replace_exact(
+        torrent_handle,
+        '''/// Per-torrent controller tying peers, pieces, and disk together.
+public actor TorrentHandle {
+''',
+        '''public struct TorrentDiscoveryDiagnostics: Sendable {
+    public let trackerPeers: Int
+    public let trackerSeeders: Int
+    public let trackerLeechers: Int
+    public let trackerFailures: Int
+    public let dhtPeers: Int
+    public let dhtNodes: Int
+    public let activePeers: Int
+    public let connectedPeers: Int
+    public let connectionAttempts: Int
+    public let connectionFailures: Int
+}
+
+/// Per-torrent controller tying peers, pieces, and disk together.
+public actor TorrentHandle {
+''',
+        "add torrent discovery diagnostics type",
+    )
+
+    replace_exact(
+        torrent_handle,
+        '''    private var nextWaitID: UInt64 = 0
+
+    public init(params: AddTorrentParams, settings: SessionSettings, group: EventLoopGroup) {
+''',
+        '''    private var nextWaitID: UInt64 = 0
+    private var lastTrackerPeerCount: Int = 0
+    private var lastTrackerSeederCount: Int = 0
+    private var lastTrackerLeecherCount: Int = 0
+    private var trackerFailureCount: Int = 0
+    private var dhtPeerCount: Int = 0
+    private var dhtNodeCount: Int = 0
+
+    public init(params: AddTorrentParams, settings: SessionSettings, group: EventLoopGroup) {
+''',
+        "store torrent discovery diagnostics",
+    )
+
+    replace_exact(
+        torrent_handle,
+        '''    private func announceToAllTrackers(trackerMgr: TrackerManager, params: AnnounceParams) async {
+        if let response = try? await trackerMgr.announce(params: params) {
+            for (address, port) in response.peers {
+                await peerManager.addPeer(address: address, port: port)
+            }
+        }
+    }
+''',
+        '''    private func announceToAllTrackers(trackerMgr: TrackerManager, params: AnnounceParams) async {
+        do {
+            let response = try await trackerMgr.announce(params: params)
+            lastTrackerPeerCount = response.peers.count
+            lastTrackerSeederCount = response.seeders
+            lastTrackerLeecherCount = response.leechers
+            for (address, port) in response.peers {
+                await peerManager.addPeer(address: address, port: port)
+            }
+        } catch {
+            trackerFailureCount += 1
+        }
+    }
+''',
+        "record tracker announce diagnostics",
+    )
+
+    replace_exact(
+        torrent_handle,
+        '''    /// Returns the file entries for this torrent, or nil if metadata is not yet available.
+    public func getFiles() -> [TorrentInfo.FileEntry]? {
+        info?.files
+    }
+''',
+        '''    internal func recordDHTDiscovery(peers: Int, nodes: Int) {
+        dhtPeerCount = max(dhtPeerCount, peers)
+        dhtNodeCount = max(dhtNodeCount, nodes)
+    }
+
+    public func discoveryDiagnostics() async -> TorrentDiscoveryDiagnostics {
+        let peer = await peerManager.diagnostics()
+        return TorrentDiscoveryDiagnostics(
+            trackerPeers: lastTrackerPeerCount,
+            trackerSeeders: lastTrackerSeederCount,
+            trackerLeechers: lastTrackerLeecherCount,
+            trackerFailures: trackerFailureCount,
+            dhtPeers: dhtPeerCount,
+            dhtNodes: dhtNodeCount,
+            activePeers: peer.active,
+            connectedPeers: peer.connected,
+            connectionAttempts: peer.attempts,
+            connectionFailures: peer.failures
+        )
+    }
+
+    /// Returns the file entries for this torrent, or nil if metadata is not yet available.
+    public func getFiles() -> [TorrentInfo.FileEntry]? {
+        info?.files
+    }
+''',
+        "expose torrent discovery diagnostics",
+    )
+
+    replace_exact(
+        session,
+        '''        let traversal = DHTTraversal(dhtNode: node)
+        guard let peers = try? await traversal.getPeers(infoHash: infoHash) else {
+            return 0
+        }
+
+        if Task.isCancelled { return 0 }
+
+        var seen = Set<String>()
+''',
+        '''        let nodes = await node.nodeCount()
+        let traversal = DHTTraversal(dhtNode: node)
+        guard let peers = try? await traversal.getPeers(infoHash: infoHash) else {
+            await handle.recordDHTDiscovery(peers: 0, nodes: nodes)
+            return 0
+        }
+
+        if Task.isCancelled { return 0 }
+
+        var seen = Set<String>()
+''',
+        "record DHT node diagnostics",
+    )
+
+    replace_exact(
+        session,
+        '''            await handle.addDiscoveredPeer(address: address, port: port)
+            added += 1
+        }
+        return added
+''',
+        '''            await handle.addDiscoveredPeer(address: address, port: port)
+            added += 1
+        }
+        await handle.recordDHTDiscovery(peers: added, nodes: await node.nodeCount())
+        return added
+''',
+        "record DHT peer diagnostics",
     )
 
     print("SwiftTorrent peer-discovery and DHT patches applied successfully")
