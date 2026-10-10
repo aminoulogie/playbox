@@ -67,6 +67,7 @@ struct MetaVideo: Codable, Identifiable, Hashable {
     let released: String?
     let overview: String?
     let thumbnail: String?
+    let runtime: String?
 }
 
 struct MetaResponse: Codable { let meta: MetaPreview }
