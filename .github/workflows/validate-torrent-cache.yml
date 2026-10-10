@@ -3,6 +3,8 @@ name: Validate torrent cache UI
 on:
   push:
     branches: [codex/torrent-source-sorting]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
