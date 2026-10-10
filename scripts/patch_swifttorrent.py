@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
+import stat
 import sys
 
 
@@ -8,6 +9,7 @@ def replace_exact(path: Path, old: str, new: str, label: str) -> None:
     count = text.count(old)
     if count != 1:
         raise SystemExit(f"{label}: expected exactly one match in {path}, found {count}")
+    path.chmod(path.stat().st_mode | stat.S_IWUSR)
     path.write_text(text.replace(old, new, 1))
     print(f"patched {label}: {path}")
 
