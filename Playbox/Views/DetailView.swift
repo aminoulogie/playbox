@@ -11,6 +11,7 @@ struct DetailView: View {
     @State private var selectedSubtitle: AddonSubtitle?
     @State private var playerURL: PlayableURL?
     @State private var isPlaying = true
+    @State private var selectedSeason = 1
 
     private let cinemeta = URL(string: "https://v3-cinemeta.strem.io")!
 
@@ -42,6 +43,29 @@ struct DetailView: View {
 
             if let description = metadata?.description ?? item.description {
                 Section("About") { Text(description) }
+            }
+
+            if item.type == "series", let videos = metadata?.videos, !videos.isEmpty {
+                let seasons = Array(Set(videos.compactMap(\.season))).sorted()
+                Section("Episodes") {
+                    Picker("Season", selection: $selectedSeason) {
+                        ForEach(seasons, id: \.self) { season in
+                            Text("Season \(season)").tag(season)
+                        }
+                    }
+                    ForEach(videos.filter { $0.season == selectedSeason }.sorted { ($0.episode ?? 0) < ($1.episode ?? 0) }) { episode in
+                        Button { Task { await loadMedia(id: episode.id) } } label: {
+                            HStack(spacing: 12) {
+                                AsyncImage(url: episode.thumbnail.flatMap(URL.init(string:))) { image in image.resizable().scaledToFill() } placeholder: { Rectangle().fill(.gray.opacity(0.2)) }
+                                    .frame(width: 100, height: 58).clipped().clipShape(RoundedRectangle(cornerRadius: 7))
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("E\(episode.episode ?? 0) · \(episode.title ?? "Episode")").font(.subheadline.weight(.semibold))
+                                    if let overview = episode.overview { Text(overview).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             if !subtitles.isEmpty {
@@ -103,6 +127,11 @@ struct DetailView: View {
             baseURL: cinemeta, type: item.type, id: item.id
         )
 
+        if item.type == "series", let first = metadata?.videos?.compactMap(\.season).min() { selectedSeason = first }
+        await loadMedia(id: item.id)
+    }
+
+    private func loadMedia(id: String) async {
         var foundStreams: [AddonStream] = []
         var foundSubtitles: [AddonSubtitle] = []
 
@@ -110,10 +139,10 @@ struct DetailView: View {
             for addon in store.addons {
                 group.addTask {
                     async let streamResult = try? AddonClient().streams(
-                        baseURL: addon.baseURL, type: item.type, id: item.id
+                        baseURL: addon.baseURL, type: item.type, id: id
                     )
                     async let subtitleResult = try? AddonClient().subtitles(
-                        baseURL: addon.baseURL, type: item.type, id: item.id
+                        baseURL: addon.baseURL, type: item.type, id: id
                     )
                     return (await streamResult ?? [], await subtitleResult ?? [])
                 }
