@@ -54,7 +54,6 @@ struct VLCLocalPlayerView: View {
     let url: URL
     let item: MetaPreview
 
-    @EnvironmentObject private var library: LibraryStore
     @StateObject private var controller = VLCPlaybackController()
 
     var body: some View {
@@ -84,7 +83,6 @@ struct VLCLocalPlayerView: View {
         }
         .onDisappear {
             controller.stop()
-            library.updatePlayback(item, position: 0, duration: 0)
         }
     }
 }
