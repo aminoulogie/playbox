@@ -20,6 +20,8 @@ struct DetailView: View {
     @State private var torrentState: TorrentEngine.EngineState = .idle
     @State private var torrentProgress: Double = 0.0
     @State private var torrentPeerCount = 0
+    @State private var torrentDownloadSpeed: Double = 0
+    @State private var torrentCacheProgress: Double = 0
     @State private var torrentDiagnosticText = "Discovery starting…"
     @State private var activeTorrentID: String?
     @State private var activeTorrentAction: TorrentAction?
@@ -479,6 +481,8 @@ struct DetailView: View {
         torrentState = .resolving
         torrentProgress = 0.0
         torrentPeerCount = 0
+        torrentDownloadSpeed = 0
+        torrentCacheProgress = 0
         torrentDiagnosticText = "Discovery starting…"
         torrentEngine = engine
 
@@ -508,11 +512,13 @@ struct DetailView: View {
         await engine.play(
             magnetLink: magnetURL,
             fileIndex: stream.fileIdx
-        ) { state, progress, peers, diagnostics in
+        ) { state, progress, peers, speed, cacheProgress, diagnostics in
             guard torrentOperationID == operationID else { return }
             torrentState = state
             torrentProgress = progress
             torrentPeerCount = peers
+            torrentDownloadSpeed = speed
+            torrentCacheProgress = cacheProgress
             torrentDiagnosticText = diagnostics
         }
 
@@ -557,6 +563,8 @@ struct DetailView: View {
         torrentState = .idle
         torrentProgress = 0.0
         torrentPeerCount = 0
+        torrentDownloadSpeed = 0
+        torrentCacheProgress = 0
         torrentDiagnosticText = "Discovery stopped"
 
         if let engine {
@@ -578,6 +586,18 @@ struct DetailView: View {
         torrentState = .idle
         torrentProgress = 0.0
         torrentPeerCount = 0
+        torrentDownloadSpeed = 0
+        torrentCacheProgress = 0
+    }
+
+    private func formatTorrentSpeed(_ bytesPerSecond: Double) -> String {
+        guard bytesPerSecond > 0 else { return "0 B/s" }
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        formatter.includesUnit = true
+        formatter.isAdaptive = true
+        return formatter.string(fromByteCount: Int64(bytesPerSecond)) + "/s"
     }
 
     private func saveTorrentDownload(from source: URL, name: String) throws -> URL {
