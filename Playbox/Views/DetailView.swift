@@ -19,6 +19,7 @@ struct DetailView: View {
     @State private var torrentState: TorrentEngine.EngineState = .idle
     @State private var torrentProgress: Double = 0.0
     @State private var torrentPeerCount = 0
+    @State private var torrentDiagnosticText = "Discovery starting…"
     @State private var activeTorrentID: String?
     @State private var activeTorrentAction: TorrentAction?
     @State private var torrentOperationID: UUID?
@@ -308,6 +309,11 @@ struct DetailView: View {
                 .font(.caption2)
                 .foregroundStyle(.blue)
 
+                Text(torrentDiagnosticText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+
             case .downloading:
                 let percent = Int(torrentProgress * 100)
                 let peerText = torrentPeerCount == 1 ? "1 peer" : "\(torrentPeerCount) peers"
@@ -319,11 +325,21 @@ struct DetailView: View {
                 .font(.caption2)
                 .foregroundStyle(.blue)
 
+                Text(torrentDiagnosticText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+
             case .failed(let message):
                 Text(message)
                     .font(.caption2)
                     .foregroundStyle(.red)
-                    .lineLimit(2)
+                    .lineLimit(3)
+
+                Text(torrentDiagnosticText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
 
             case .ready:
                 Text(activeTorrentAction == .download ? "Saving to Files…" : "Opening player…")
@@ -452,6 +468,7 @@ struct DetailView: View {
         torrentState = .resolving
         torrentProgress = 0.0
         torrentPeerCount = 0
+        torrentDiagnosticText = "Discovery starting…"
         torrentEngine = engine
 
         torrentTask = Task { @MainActor in
@@ -476,11 +493,12 @@ struct DetailView: View {
         await engine.play(
             magnetLink: magnetURL,
             fileIndex: stream.fileIdx
-        ) { state, progress, peers in
+        ) { state, progress, peers, diagnostics in
             guard torrentOperationID == operationID else { return }
             torrentState = state
             torrentProgress = progress
             torrentPeerCount = peers
+            torrentDiagnosticText = diagnostics
         }
 
         guard torrentOperationID == operationID, !Task.isCancelled else { return }
@@ -526,6 +544,7 @@ struct DetailView: View {
         torrentState = .idle
         torrentProgress = 0.0
         torrentPeerCount = 0
+        torrentDiagnosticText = "Discovery stopped"
 
         if let engine {
             Task { @MainActor in
