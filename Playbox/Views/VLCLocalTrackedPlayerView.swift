@@ -164,7 +164,10 @@ final class VLCTorrentPlayerController: NSObject, ObservableObject {
             ? Int(resumeSeconds * 1000)
             : nil
 
-        let media = VLCMedia(url: url)
+        guard let media = VLCMedia(url: url) else {
+            isOpening = false
+            return
+        }
         media.addOptions([
             "file-caching": 2500,
             "network-caching": 2500
@@ -176,10 +179,10 @@ final class VLCTorrentPlayerController: NSObject, ObservableObject {
             while !Task.isCancelled {
                 guard let self else { return }
 
-                self.currentMilliseconds = max(0, self.player.time.intValue)
+                self.currentMilliseconds = max(0, Int(self.player.time.intValue))
                 self.durationMilliseconds = max(
                     0,
-                    self.player.media?.length.intValue ?? 0
+                    Int(self.player.media?.length.intValue ?? 0)
                 )
                 self.isPlaying = self.player.isPlaying
 
@@ -208,7 +211,7 @@ final class VLCTorrentPlayerController: NSObject, ObservableObject {
     }
 
     func seek(to progress: Double) {
-        player.position = Float(min(max(progress, 0), 1))
+        player.position = min(max(progress, 0), 1)
     }
 
     func stop() {
@@ -238,20 +241,20 @@ final class VLCTorrentPlayerController: NSObject, ObservableObject {
 }
 
 extension VLCTorrentPlayerController: VLCMediaPlayerDelegate {
-    nonisolated func mediaPlayerStateChanged(_ aNotification: Notification!) {
+    nonisolated func mediaPlayerStateChanged(_ newState: VLCMediaPlayerState) {
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.isPlaying = self.player.isPlaying
-            if self.player.state == .playing {
+            if newState == .playing {
                 self.isOpening = false
             }
         }
     }
 
-    nonisolated func mediaPlayerTimeChanged(_ aNotification: Notification!) {
+    nonisolated func mediaPlayerTimeChanged(_ aNotification: Notification) {
         Task { @MainActor [weak self] in
             guard let self else { return }
-            self.currentMilliseconds = max(0, self.player.time.intValue)
+            self.currentMilliseconds = max(0, Int(self.player.time.intValue))
         }
     }
 }
