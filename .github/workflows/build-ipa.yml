@@ -7,6 +7,7 @@ on:
     paths:
       - 'Playbox/**'
       - 'project.yml'
+      - 'scripts/patch_swifttorrent.py'
       - '.github/workflows/build-ipa.yml'
 
 permissions:
@@ -29,6 +30,21 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate --spec project.yml
 
+      - name: Resolve Swift packages
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -resolvePackageDependencies \
+            -project Playbox.xcodeproj \
+            -scheme Playbox \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData"
+
+      - name: Patch SwiftTorrent peer discovery
+        run: |
+          set -euo pipefail
+          python3 scripts/patch_swifttorrent.py \
+            "$RUNNER_TEMP/DerivedData/SourcePackages/checkouts/swift-torrent"
+
       - name: Stamp app version
         run: |
           /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0" Playbox.xcodeproj/project.pbxproj 2>/dev/null || true
@@ -43,6 +59,7 @@ jobs:
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -disableAutomaticPackageResolution \
             CODE_SIGNING_ALLOWED=NO \
             MARKETING_VERSION="1.0.${{ github.run_number }}" \
             CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
@@ -83,7 +100,6 @@ jobs:
             This IPA is unsigned and requires valid Apple signing before normal iPhone installation.
           files: Playbox-v1.0.${{ github.run_number }}.ipa
           fail_on_unmatched_files: true
-
 
       - name: Update stable latest release
         if: success()
