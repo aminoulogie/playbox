@@ -52,13 +52,7 @@ def main() -> None:
             throw TrackerError.invalidURL
         }
 
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 4
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse,
-              200..<300 ~= http.statusCode else {
-            throw TrackerError.invalidResponse
-        }
+        let (data, _) = try await URLSession.shared.data(from: url)
         return try parseAnnounceResponse(data)
     }
 ''',
@@ -97,7 +91,13 @@ def main() -> None:
             throw TrackerError.invalidURL
         }
 
-        let (data, _) = try await URLSession.shared.data(from: url)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 4
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse,
+              200..<300 ~= http.statusCode else {
+            throw TrackerError.invalidResponse
+        }
         return try parseAnnounceResponse(data)
     }
 ''',
