@@ -1,7 +1,7 @@
 import SwiftUI
 import AVKit
 
-struct TrackedPlayerView: View {
+struct AVTrackedPlayerView: View {
     let url: URL
     let item: MetaPreview
     @EnvironmentObject private var library: LibraryStore
