@@ -85,8 +85,8 @@ xcodebuild \
   CODE_SIGNING_ALLOWED=NO \
   build
 
-NATIVE_FRAMEWORK="$(find "$SLICE_DIR" -type d -name LibtorrentNative.framework -print | sort | head -n 1)"
-test -n "$NATIVE_FRAMEWORK"
+NATIVE_FRAMEWORK="$SLICE_DIR/Release-iphoneos/LibtorrentNative.framework"
+test -d "$NATIVE_FRAMEWORK"
 test -f "$NATIVE_FRAMEWORK/LibtorrentNative"
 
 rm -rf "$VENDOR_DIR/LibtorrentNative.framework" "$VENDOR_DIR/openssl.framework"
