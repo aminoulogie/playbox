@@ -91,7 +91,13 @@ struct DetailView: View {
                         playerURL = PlayableURL(url: url)
                     } label: {
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(stream.title ?? stream.name ?? "Source")
+                            HStack {
+                                Text(stream.quality).font(.headline)
+                                Spacer()
+                                if let size = stream.fileSize { Text(size).font(.caption).foregroundStyle(.secondary) }
+                            }
+                            Text(stream.title ?? stream.name ?? "Source").font(.caption).lineLimit(2)
+                            Text(stream.sourceSummary).font(.caption2).foregroundStyle(.secondary)
                             Label(
                                 stream.isTorrent ? "Torrent source — external stream bridge required" : "Play",
                                 systemImage: stream.playableURL == nil ? "lock.slash" : "play.fill"
@@ -153,7 +159,10 @@ struct DetailView: View {
             }
         }
 
-        streams = Array(Set(foundStreams))
+        streams = Array(Set(foundStreams)).sorted {
+            if ($0.playableURL != nil) != ($1.playableURL != nil) { return $0.playableURL != nil }
+            return $0.qualityRank > $1.qualityRank
+        }
         subtitles = Array(Set(foundSubtitles))
             .sorted { ($0.lang ?? "") < ($1.lang ?? "") }
     }
