@@ -10,7 +10,7 @@ on:
       - '.github/workflows/build-ipa.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -59,3 +59,15 @@ jobs:
           path: Playbox-unsigned.ipa
           if-no-files-found: error
           retention-days: 30
+
+      - name: Create GitHub Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Playbox Build ${{ github.run_number }}
+          body: |
+            Automated Playbox iOS build from commit ${{ github.sha }}.
+            This IPA is unsigned and requires valid Apple signing before normal iPhone installation.
+          files: Playbox-unsigned.ipa
+          fail_on_unmatched_files: true
