@@ -6,12 +6,18 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
+packages:
+  SwiftTorrent:
+    url: https://github.com/warppipe/swift-torrent.git
+    from: 0.1.0
 targets:
   Playbox:
     type: application
     platform: iOS
     sources:
       - path: Playbox
+    dependencies:
+      - package: SwiftTorrent
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.playboxapp.playbox
