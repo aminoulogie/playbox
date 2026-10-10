@@ -11,6 +11,7 @@ struct DetailView: View {
     @State private var subtitles: [AddonSubtitle] = []
     @State private var selectedSubtitle: AddonSubtitle?
     @State private var playerURL: PlayableURL?
+    @State private var torrentPlayerSession: TorrentPlayerSession?
     @State private var selectedSeason = 1
     @State private var showUnsupported = false
     @State private var selectedEpisodeID: String?
@@ -50,6 +51,16 @@ struct DetailView: View {
         .task { await loadDetails() }
         .sheet(item: $playerURL) { value in
             TrackedPlayerView(url: value.url, item: metadata ?? item)
+        }
+        .sheet(item: $torrentPlayerSession, onDismiss: {
+            if activeTorrentAction == .play {
+                cancelActiveTorrent()
+            }
+        }) { session in
+            TorrentPlaybackView(
+                engine: session.engine,
+                item: metadata ?? item
+            )
         }
         .onDisappear {
             cancelActiveTorrent()
@@ -471,6 +482,10 @@ struct DetailView: View {
         torrentDiagnosticText = "Discovery starting…"
         torrentEngine = engine
 
+        if action == .play {
+            torrentPlayerSession = TorrentPlayerSession(engine: engine)
+        }
+
         torrentTask = Task { @MainActor in
             await runTorrent(
                 stream,
@@ -499,23 +514,13 @@ struct DetailView: View {
             torrentProgress = progress
             torrentPeerCount = peers
             torrentDiagnosticText = diagnostics
-
-            if action == .play,
-               case .ready(let url) = state,
-               playerURL == nil {
-                playerURL = PlayableURL(url: url)
-            }
         }
 
         guard torrentOperationID == operationID, !Task.isCancelled else { return }
 
         switch torrentState {
         case .ready(let url):
-            if action == .play {
-                if playerURL == nil {
-                    playerURL = PlayableURL(url: url)
-                }
-            } else {
+            if action == .download {
                 do {
                     let destination = try saveTorrentDownload(
                         from: url,
@@ -618,4 +623,10 @@ private enum TorrentAction: Equatable {
 private struct PlayableURL: Identifiable {
     let url: URL
     var id: String { url.absoluteString }
+}
+
+
+private struct TorrentPlayerSession: Identifiable {
+    let id = UUID()
+    let engine: TorrentEngine
 }
