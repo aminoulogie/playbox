@@ -3,6 +3,7 @@ import VideoPlayer
 
 struct DetailView: View {
     @EnvironmentObject private var store: AddonStore
+    @EnvironmentObject private var library: LibraryStore
     let item: MetaPreview
 
     @State private var metadata: MetaPreview?
@@ -88,6 +89,7 @@ struct DetailView: View {
                 ForEach(streams) { stream in
                     Button {
                         guard let url = stream.playableURL else { return }
+                        library.markStarted(metadata ?? item)
                         playerURL = PlayableURL(url: url)
                     } label: {
                         VStack(alignment: .leading, spacing: 3) {
@@ -107,6 +109,13 @@ struct DetailView: View {
                         }
                     }
                     .disabled(stream.playableURL == nil)
+                }
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { library.toggle(metadata ?? item) } label: {
+                    Image(systemName: library.contains(metadata ?? item) ? "bookmark.fill" : "bookmark")
                 }
             }
         }
