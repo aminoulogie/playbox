@@ -44,9 +44,7 @@ struct VLCVideoSurface: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
-        if controller.player.drawable as AnyObject? !== uiView {
-            controller.player.drawable = uiView
-        }
+        controller.player.drawable = uiView
     }
 }
 
