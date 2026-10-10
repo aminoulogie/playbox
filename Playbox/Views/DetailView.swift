@@ -68,8 +68,12 @@ struct DetailView: View {
                     } label: {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(stream.title ?? stream.name ?? "Source")
-                            Text(stream.isTorrent ? "Torrent source — external stream bridge required" : "HTTP/HLS — playable")
-                                .font(.caption).foregroundStyle(.secondary)
+                            Label(
+                                stream.isTorrent ? "Torrent source — external stream bridge required" : "Play",
+                                systemImage: stream.playableURL == nil ? "lock.slash" : "play.fill"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(stream.playableURL == nil ? .secondary : .blue)
                         }
                     }
                     .disabled(stream.playableURL == nil)
@@ -82,6 +86,8 @@ struct DetailView: View {
         .sheet(item: $playerURL) { value in
             VStack(spacing: 0) {
                 VideoPlayer(url: value.url, play: $isPlaying)
+                    .autoReplay(false)
+                    .mute(false)
                     .ignoresSafeArea()
                 if let subtitle = selectedSubtitle {
                     Text("CC: \(subtitle.lang?.uppercased() ?? "Subtitle") selected")
