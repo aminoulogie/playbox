@@ -309,10 +309,10 @@ struct DetailView: View {
                 .font(.caption2)
                 .foregroundStyle(.blue)
 
-                Text(torrentDiagnosticText)
+                Text("Magnet trackers: \(stream.torrentTrackerCount) · " + torrentDiagnosticText)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                    .lineLimit(3)
+                    .lineLimit(4)
 
             case .downloading:
                 let percent = Int(torrentProgress * 100)
@@ -325,10 +325,10 @@ struct DetailView: View {
                 .font(.caption2)
                 .foregroundStyle(.blue)
 
-                Text(torrentDiagnosticText)
+                Text("Magnet trackers: \(stream.torrentTrackerCount) · " + torrentDiagnosticText)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                    .lineLimit(3)
+                    .lineLimit(4)
 
             case .failed(let message):
                 Text(message)
@@ -336,10 +336,10 @@ struct DetailView: View {
                     .foregroundStyle(.red)
                     .lineLimit(3)
 
-                Text(torrentDiagnosticText)
+                Text("Magnet trackers: \(stream.torrentTrackerCount) · " + torrentDiagnosticText)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                    .lineLimit(3)
+                    .lineLimit(4)
 
             case .ready:
                 Text(activeTorrentAction == .download ? "Saving to Files…" : "Opening player…")

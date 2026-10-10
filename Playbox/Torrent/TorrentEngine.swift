@@ -222,7 +222,7 @@ final class TorrentEngine: ObservableObject {
 
     private func discoveryText(for handle: TorrentHandle) async -> String {
         let d = await handle.discoveryDiagnostics()
-        return "Tracker: \(d.trackerPeers) peers (\(d.trackerSeeders)S/\(d.trackerLeechers)L) · DHT: \(d.dhtPeers) peers/\(d.dhtNodes) nodes · Attempts: \(d.connectionAttempts) · Connected: \(d.connectedPeers) · Failed: \(d.connectionFailures)"
+        return "Tracker: \(d.trackerPeers) peers (\(d.trackerSeeders)S/\(d.trackerLeechers)L, \(d.trackerFailures) failures) · DHT: \(d.dhtPeers) peers/\(d.dhtNodes) nodes · Attempts: \(d.connectionAttempts) · Connected: \(d.connectedPeers) · Failed: \(d.connectionFailures)"
     }
 
     private func update(

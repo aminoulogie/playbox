@@ -169,10 +169,34 @@ struct AddonStream: Codable, Identifiable, Hashable {
         return components.string ?? raw
     }
 
-    private var torrentTrackers: [String] {
-        var seen = Set<String>()
+    var torrentTrackerCount: Int { torrentTrackers.count }
 
-        return (sources ?? []).compactMap { source in
+    private static let fallbackHTTPSSTrackers = [
+        "https://tracker.pmman.tech:443/announce",
+        "https://tracker.nekomi.cn:443/announce",
+        "https://004430.xyz:443/announce",
+        "https://tracker.7471.top:443/announce",
+        "https://tr.nyacat.pw:443/announce",
+        "https://open.ftorrent.com:443/announce",
+        "https://tracker.foreverpirates.co:443/announce",
+        "https://tracker.bug38.com:443/announce",
+        "https://pybittrack.retiolus.net:443/announce",
+        "https://t.213891.xyz:443/announce"
+    ]
+
+    private static let fallbackUDPTrackers = [
+        "udp://tracker.opentrackr.org:1337/announce",
+        "udp://open.stealth.si:80/announce",
+        "udp://tracker.torrent.eu.org:451/announce",
+        "udp://open.demonii.com:1337/announce",
+        "udp://exodus.desync.com:6969/announce",
+        "udp://tracker.qu.ax:6969/announce",
+        "udp://tracker2.dler.org:80/announce",
+        "udp://tracker.dler.org:6969/announce"
+    ]
+
+    private var torrentTrackers: [String] {
+        let sourceTrackers = (sources ?? []).compactMap { source -> String? in
             let value = source.trimmingCharacters(in: .whitespacesAndNewlines)
             guard value.lowercased().hasPrefix("tracker:") else { return nil }
 
@@ -183,10 +207,18 @@ struct AddonStream: Codable, Identifiable, Hashable {
             guard lowered.hasPrefix("http://")
                     || lowered.hasPrefix("https://")
                     || lowered.hasPrefix("udp://") else { return nil }
-            guard seen.insert(normalizedTracker(tracker)).inserted else { return nil }
-
             return tracker
         }
+
+        // Prefer HTTPS on iOS. UDP/DHT may be blocked by the current network and
+        // cleartext HTTP can be rejected by App Transport Security.
+        let ordered = sourceTrackers.filter { $0.lowercased().hasPrefix("https://") }
+            + Self.fallbackHTTPSSTrackers
+            + sourceTrackers.filter { !$0.lowercased().hasPrefix("https://") }
+            + Self.fallbackUDPTrackers
+
+        var seen = Set<String>()
+        return ordered.filter { seen.insert(normalizedTracker($0)).inserted }
     }
 
     private func normalizedTracker(_ value: String) -> String {
