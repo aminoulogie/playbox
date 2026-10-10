@@ -9,7 +9,7 @@ settings:
 packages:
   SwiftTorrent:
     url: https://github.com/warppipe/swift-torrent.git
-    from: 0.1.0
+    branch: main
 targets:
   Playbox:
     type: application
