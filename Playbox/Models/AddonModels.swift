@@ -87,13 +87,15 @@ struct AddonSubtitle: Codable, Identifiable, Hashable {
 struct AddonStream: Codable, Identifiable, Hashable {
     let name: String?
     let title: String?
+    let description: String?
     let url: String?
+    let externalUrl: String?
     let infoHash: String?
     let fileIdx: Int?
     let sources: [String]?
 
     var id: String {
-        [name, title, url, infoHash, fileIdx.map(String.init), sources?.joined(separator: ",")]
+        [name, title, description, url, externalUrl, infoHash, fileIdx.map(String.init), sources?.joined(separator: ",")]
             .compactMap { $0 }.joined(separator: "|")
     }
 
@@ -106,10 +108,20 @@ struct AddonStream: Codable, Identifiable, Hashable {
         return value
     }
 
+    var externalPageURL: URL? {
+        guard let raw = externalUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return nil }
+        let encoded = raw.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? raw
+        guard let value = URL(string: encoded),
+              ["http", "https"].contains(value.scheme?.lowercased() ?? "") else { return nil }
+        return value
+    }
+
     var playbackStatus: String {
         if playableURL != nil { return "Direct stream · Tap to play" }
         if isTorrent { return "Torrent source · Play or download" }
-        return "Unsupported stream URL"
+        if externalPageURL != nil { return "External offer · Opens provider website" }
+        return "Unsupported source"
     }
 
     var isTorrent: Bool {
@@ -225,7 +237,7 @@ struct AddonStream: Codable, Identifiable, Hashable {
         value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
-    private var sourceText: String { [name, title].compactMap { $0 }.joined(separator: " ") }
+    private var sourceText: String { [name, title, description].compactMap { $0 }.joined(separator: " ") }
 
     var quality: String {
         let text = sourceText.lowercased()
