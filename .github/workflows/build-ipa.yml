@@ -6,8 +6,11 @@ on:
     branches: [main]
     paths:
       - 'Playbox/**'
+      - 'native/**'
+      - 'vendor/**'
+      - 'ThirdParty/**'
       - 'project.yml'
-      - 'scripts/patch_swifttorrent.py'
+      - 'scripts/build_libtorrent_ios.sh'
       - '.github/workflows/build-ipa.yml'
 
 permissions:
@@ -16,7 +19,7 @@ permissions:
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -24,26 +27,24 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      - name: Install build dependencies
+        run: brew install xcodegen cmake boost
+
+      - name: Build libtorrent backend for iOS 17
+        env:
+          IOS_DEPLOYMENT_TARGET: "17.0"
+          LIBTORRENT_REF: "v2.0.13"
+        run: bash scripts/build_libtorrent_ios.sh
+
+      - name: Verify native frameworks
+        run: |
+          set -euo pipefail
+          test -f vendor/LibtorrentNative.framework/LibtorrentNative
+          test -f vendor/openssl.framework/openssl
+          otool -L vendor/LibtorrentNative.framework/LibtorrentNative
 
       - name: Generate Xcode project
         run: xcodegen generate --spec project.yml
-
-      - name: Resolve Swift packages
-        run: |
-          set -euo pipefail
-          xcodebuild \
-            -resolvePackageDependencies \
-            -project Playbox.xcodeproj \
-            -scheme Playbox \
-            -derivedDataPath "$RUNNER_TEMP/DerivedData"
-
-      - name: Patch SwiftTorrent peer discovery
-        run: |
-          set -euo pipefail
-          python3 scripts/patch_swifttorrent.py \
-            "$RUNNER_TEMP/DerivedData/SourcePackages/checkouts/swift-torrent"
 
       - name: Stamp app version
         run: |
@@ -59,13 +60,22 @@ jobs:
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
-            -disableAutomaticPackageResolution \
             CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
             MARKETING_VERSION="1.0.${{ github.run_number }}" \
             CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             INFOPLIST_KEY_CFBundleShortVersionString="1.0.${{ github.run_number }}" \
             INFOPLIST_KEY_CFBundleVersion="${{ github.run_number }}" \
             build
+
+      - name: Verify embedded torrent frameworks
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/Playbox.app"
+          test -f "$APP/Frameworks/LibtorrentNative.framework/LibtorrentNative"
+          test -f "$APP/Frameworks/openssl.framework/openssl"
+          otool -L "$APP/Frameworks/LibtorrentNative.framework/LibtorrentNative"
 
       - name: Package unsigned IPA
         run: |
@@ -97,6 +107,7 @@ jobs:
           name: Playbox v1.0.${{ github.run_number }}
           body: |
             Automated Playbox iOS build from commit ${{ github.sha }}.
+            Torrent backend: libtorrent 2.0.13.
             This IPA is unsigned and requires valid Apple signing before normal iPhone installation.
           files: Playbox-v1.0.${{ github.run_number }}.ipa
           fail_on_unmatched_files: true
@@ -109,4 +120,4 @@ jobs:
           gh release delete "$(gh release list --limit 100 | awk '/Latest/{print $3; exit}')" --cleanup-tag -y 2>/dev/null || true
           gh release create "v1.0.${GITHUB_RUN_NUMBER}-latest" Playbox-latest.ipa \
             --title "Playbox v1.0.${GITHUB_RUN_NUMBER} — Latest" \
-            --notes "Version 1.0.${GITHUB_RUN_NUMBER}. Internal build ${GITHUB_RUN_NUMBER}. Commit: ${GITHUB_SHA}."
+            --notes "Version 1.0.${GITHUB_RUN_NUMBER}. libtorrent 2.0.13 backend. Commit: ${GITHUB_SHA}."
