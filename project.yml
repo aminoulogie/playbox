@@ -6,7 +6,7 @@ options:
 packages:
   VLCKitSPM:
     url: https://github.com/JustFoxLabs/vlckit-spm
-    exact: 4.0.0-alpha.24-fox.1
+    version: 4.0.0-alpha.24-fox.1
 settings:
   base:
     SWIFT_VERSION: "5.0"
