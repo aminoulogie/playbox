@@ -6,16 +6,10 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-packages:
-  VideoPlayer:
-    url: https://github.com/wxxsw/VideoPlayer
-    branch: master
 targets:
   Playbox:
     type: application
     platform: iOS
-    dependencies:
-      - package: VideoPlayer
     sources:
       - path: Playbox
     settings:
@@ -30,3 +24,5 @@ targets:
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         SWIFT_EMIT_LOC_STRINGS: YES
         ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: NO
+        SWIFT_COMPILATION_MODE: wholemodule
+        DEAD_CODE_STRIPPING: YES
