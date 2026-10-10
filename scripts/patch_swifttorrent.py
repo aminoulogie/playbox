@@ -298,7 +298,7 @@ def main() -> None:
 
     replace_exact(
         dht_node,
-        '''    /// Bootstrap by contacting well-known nodes
+        '''    /// Bootstrap by contacting well-known nodes.
     private func bootstrap() async {
 ''',
         '''    /// Stop the DHT socket so sessions can be cancelled/restarted safely.
