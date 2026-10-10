@@ -11,11 +11,60 @@ struct TrackedPlayerView: View {
     @State private var failureObserver: NSObjectProtocol?
     @State private var errorMessage: String?
     @State private var isLoading = true
+    @State private var currentProgress: Double = 0
+    @State private var currentSpeed: Double = 0
+    @State private var lastLoaded: Int64 = 0
+    @State private var lastSpeedUpdate: Date = Date()
+    @State private var progressTask: Task<Void, Never>?
 
     var body: some View {
         ZStack {
             VideoPlayer(player: player).ignoresSafeArea()
-            if isLoading && errorMessage == nil { ProgressView().controlSize(.large) }
+
+            if isLoading && errorMessage == nil {
+                VStack(spacing: 18) {
+                    ZStack {
+                        Circle()
+                            .stroke(Color.white.opacity(0.2), lineWidth: 8)
+                            .frame(width: 126, height: 126)
+
+                        Circle()
+                            .trim(from: 0, to: max(0.01, min(currentProgress, 1.0)))
+                            .stroke(
+                                AngularGradient(
+                                    gradient: Gradient(colors: [.blue, .cyan, .white]),
+                                    center: .center
+                                ),
+                                style: StrokeStyle(lineWidth: 8, lineCap: .round)
+                            )
+                            .frame(width: 126, height: 126)
+                            .rotationEffect(.degrees(-90))
+                            .animation(.linear(duration: 0.12), value: currentProgress)
+
+                        VStack(spacing: 6) {
+                            Text(String(format: "%.2f%%", currentProgress * 100))
+                                .font(.system(size: 24, weight: .bold, design: .rounded))
+                                .monospacedDigit()
+                            Text("Loading")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.down")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text(formatSpeed(currentSpeed))
+                            .font(.system(size: 13, weight: .medium))
+                            .monospacedDigit()
+                    }
+                    .foregroundStyle(.white.opacity(0.9))
+                }
+                .padding(22)
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 26))
+            }
+
             if let errorMessage {
                 VStack(spacing: 14) {
                     ContentUnavailableView("Playback failed", systemImage: "exclamationmark.triangle", description: Text(errorMessage))
@@ -34,6 +83,10 @@ struct TrackedPlayerView: View {
         cleanupCurrentItem()
         errorMessage = nil
         isLoading = true
+        currentProgress = 0
+        currentSpeed = 0
+        lastLoaded = 0
+        lastSpeedUpdate = Date()
 
         let asset = AVURLAsset(url: url, options: [
             AVURLAssetAllowsCellularAccessKey: true,
@@ -88,6 +141,8 @@ struct TrackedPlayerView: View {
                 library.updatePlayback(item, position: CMTimeGetSeconds(time), duration: duration)
             }
         }
+
+        startProgressMonitor(playerItem)
         player.play()
 
         try? await Task.sleep(for: .seconds(20))
@@ -95,6 +150,47 @@ struct TrackedPlayerView: View {
             isLoading = false
             errorMessage = "The stream did not start within 20 seconds. The server may be unavailable or the media format may not be supported."
         }
+    }
+
+    private func startProgressMonitor(_ playerItem: AVPlayerItem) {
+        progressTask?.cancel()
+        progressTask = Task {
+            while !Task.isCancelled {
+                let ranges = playerItem.loadedTimeRanges
+                let loaded = ranges.reduce(Int64(0)) { total, range in
+                    total + Int64(range.timeRangeValue.duration.value)
+                }
+
+                let duration = playerItem.duration
+                let progress = duration.value > 0 ? Double(loaded) / Double(duration.value) : 0
+
+                await MainActor.run {
+                    let now = Date()
+                    let delta = now.timeIntervalSince(lastSpeedUpdate)
+                    if delta >= 0.1 {
+                        let bytesDelta = loaded - lastLoaded
+                        let speed = delta > 0 ? Double(bytesDelta) / delta : 0
+                        currentSpeed = speed
+                        lastLoaded = loaded
+                        lastSpeedUpdate = now
+                    }
+                    currentProgress = min(max(progress, 0), 1)
+                }
+
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+    }
+
+    private func formatSpeed(_ value: Double) -> String {
+        let units = ["B/s", "KB/s", "MB/s", "GB/s"]
+        var current = value
+        var index = 0
+        while current >= 1024 && index < units.count - 1 {
+            current /= 1024
+            index += 1
+        }
+        return String(format: "%.2f %@", current, units[index])
     }
 
     @MainActor
@@ -119,6 +215,8 @@ struct TrackedPlayerView: View {
         statusObserver = nil
         if let failureObserver { NotificationCenter.default.removeObserver(failureObserver) }
         failureObserver = nil
+        progressTask?.cancel()
+        progressTask = nil
         player.replaceCurrentItem(with: nil)
     }
 
