@@ -53,6 +53,20 @@ struct MetaPreview: Codable, Identifiable, Hashable {
     let description: String?
     let imdbRating: String?
     let releaseInfo: String?
+    let genres: [String]?
+    let runtime: String?
+    let background: String?
+    let videos: [MetaVideo]?
+}
+
+struct MetaVideo: Codable, Identifiable, Hashable {
+    let id: String
+    let title: String?
+    let season: Int?
+    let episode: Int?
+    let released: String?
+    let overview: String?
+    let thumbnail: String?
 }
 
 struct MetaResponse: Codable { let meta: MetaPreview }
