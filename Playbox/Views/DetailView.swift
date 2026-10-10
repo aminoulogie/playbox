@@ -18,6 +18,13 @@ struct DetailView: View {
     @State private var torrentEngine: TorrentEngine?
     @State private var torrentState: TorrentEngine.EngineState = .idle
     @State private var torrentProgress: Double = 0.0
+    @State private var torrentPeerCount = 0
+    @State private var activeTorrentID: String?
+    @State private var activeTorrentAction: TorrentAction?
+    @State private var torrentOperationID: UUID?
+    @State private var torrentTask: Task<Void, Never>?
+    @State private var torrentErrors: [String: String] = [:]
+    @State private var torrentDownloads: [String: URL] = [:]
     private let cinemeta = URL(string: "https://v3-cinemeta.strem.io")!
 
     var body: some View {
@@ -42,6 +49,9 @@ struct DetailView: View {
         .task { await loadDetails() }
         .sheet(item: $playerURL) { value in
             TrackedPlayerView(url: value.url, item: metadata ?? item)
+        }
+        .onDisappear {
+            cancelActiveTorrent()
         }
     }
 
@@ -78,6 +88,7 @@ struct DetailView: View {
                     ForEach(seasons(in: videos), id: \.self) { season in Text("Season \(season)").tag(season) }
                 }
                 .onChange(of: selectedSeason) {
+                    cancelActiveTorrent()
                     selectedEpisodeID = nil
                     streams = []
                     subtitles = []
@@ -85,6 +96,7 @@ struct DetailView: View {
 
                 ForEach(episodes(in: videos)) { episode in
                     Button {
+                        cancelActiveTorrent()
                         selectedEpisodeID = episode.id
                         Task { await loadMedia(id: episode.id) }
                     } label: {
@@ -141,18 +153,6 @@ struct DetailView: View {
                 ContentUnavailableView("Choose an episode", systemImage: "rectangle.stack", description: Text("Select an episode above to find its available sources."))
             } else if isLoadingSources {
                 HStack { Spacer(); ProgressView("Finding sources…"); Spacer() }
-            } else if case .downloading = torrentState {
-                HStack(spacing: 12) {
-                    Spacer()
-                    ProgressView(value: torrentProgress)
-                        .frame(width: 44)
-                    Text("Downloading torrent… \(Int(torrentProgress * 100))%")
-                    Spacer()
-                }
-            } else if case .resolving = torrentState {
-                HStack { Spacer(); ProgressView("Resolving magnet link…"); Spacer() }
-            } else if case .failed(let error) = torrentState {
-                ContentUnavailableView("Torrent failed", systemImage: "exclamationmark.triangle", description: Text(error))
             } else if streams.isEmpty {
                 ContentUnavailableView("No sources", systemImage: "play.slash", description: Text("No installed add-on returned a source for this title."))
             } else if playableStreams.isEmpty && torrentStreams.isEmpty {
@@ -183,17 +183,53 @@ struct DetailView: View {
             }
 
             ForEach(torrentStreams) { stream in
-                Button {
-                    Task { await playTorrent(stream) }
-                } label: {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(stream.quality).font(.headline)
-                            Text(stream.title ?? stream.name ?? "Torrent source").font(.caption).lineLimit(2)
-                            Text(stream.sourceSummary).font(.caption2).foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(stream.quality).font(.headline)
+                        Text(stream.title ?? stream.name ?? "Torrent source").font(.caption).lineLimit(2)
+                        Text(stream.sourceSummary).font(.caption2).foregroundStyle(.secondary)
+                        torrentStatus(for: stream)
+                    }
+
+                    Spacer()
+
+                    if activeTorrentID == stream.id {
+                        Button {
+                            cancelActiveTorrent()
+                        } label: {
+                            Image(systemName: "stop.circle.fill")
+                                .font(.title2)
+                                .foregroundStyle(.red)
                         }
-                        Spacer()
-                        Image(systemName: "play.circle.fill").font(.title2)
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Stop torrent")
+                    } else {
+                        Button {
+                            startTorrent(stream, action: .play)
+                        } label: {
+                            Image(systemName: "play.circle.fill")
+                                .font(.title2)
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(activeTorrentID != nil)
+                        .accessibilityLabel("Play torrent")
+
+                        if torrentDownloads[stream.id] != nil {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.title2)
+                                .foregroundStyle(.green)
+                                .accessibilityLabel("Torrent downloaded")
+                        } else {
+                            Button {
+                                startTorrent(stream, action: .download)
+                            } label: {
+                                Image(systemName: "arrow.down.circle.fill")
+                                    .font(.title2)
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(activeTorrentID != nil)
+                            .accessibilityLabel("Download torrent")
+                        }
                     }
                 }
             }
@@ -256,6 +292,56 @@ struct DetailView: View {
                 }
                 .buttonStyle(.borderless)
             }
+        }
+    }
+
+    @ViewBuilder private func torrentStatus(for stream: AddonStream) -> some View {
+        if activeTorrentID == stream.id {
+            switch torrentState {
+            case .resolving:
+                let peerText = torrentPeerCount == 1 ? "1 peer" : "\(torrentPeerCount) peers"
+                Text(
+                    activeTorrentAction == .download
+                        ? "Finding torrent metadata… \(peerText)"
+                        : "Preparing playback… \(peerText)"
+                )
+                .font(.caption2)
+                .foregroundStyle(.blue)
+
+            case .downloading:
+                let percent = Int(torrentProgress * 100)
+                let peerText = torrentPeerCount == 1 ? "1 peer" : "\(torrentPeerCount) peers"
+                Text(
+                    activeTorrentAction == .download
+                        ? "Downloading… \(percent)% · \(peerText)"
+                        : "Preparing playback… \(percent)% · \(peerText)"
+                )
+                .font(.caption2)
+                .foregroundStyle(.blue)
+
+            case .failed(let message):
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+
+            case .ready:
+                Text(activeTorrentAction == .download ? "Saving to Files…" : "Opening player…")
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+
+            case .idle:
+                EmptyView()
+            }
+        } else if torrentDownloads[stream.id] != nil {
+            Text("Saved to Files › Playbox › Downloads")
+                .font(.caption2)
+                .foregroundStyle(.green)
+        } else if let message = torrentErrors[stream.id] {
+            Text(message)
+                .font(.caption2)
+                .foregroundStyle(.red)
+                .lineLimit(2)
         }
     }
 
@@ -347,32 +433,159 @@ struct DetailView: View {
         subtitles = Array(Set(foundSubtitles)).sorted { ($0.lang ?? "") < ($1.lang ?? "") }
     }
 
-    private func playTorrent(_ stream: AddonStream) async {
-        let engine = TorrentEngine()
-        torrentEngine = engine
-        torrentState = .idle
+    @MainActor
+    private func startTorrent(_ stream: AddonStream, action: TorrentAction) {
+        guard activeTorrentID == nil else { return }
 
         guard let magnetURL = stream.torrentMagnetURI else {
-            torrentState = .failed("No magnet URL or info hash was supplied for this torrent source")
-            torrentProgress = 0.0
+            torrentErrors[stream.id] = "No magnet URL or info hash was supplied for this torrent source"
             return
         }
 
+        let operationID = UUID()
+        let engine = TorrentEngine()
+
+        torrentErrors[stream.id] = nil
+        activeTorrentID = stream.id
+        activeTorrentAction = action
+        torrentOperationID = operationID
         torrentState = .resolving
         torrentProgress = 0.0
+        torrentPeerCount = 0
+        torrentEngine = engine
 
+        torrentTask = Task { @MainActor in
+            await runTorrent(
+                stream,
+                action: action,
+                magnetURL: magnetURL,
+                operationID: operationID,
+                engine: engine
+            )
+        }
+    }
+
+    @MainActor
+    private func runTorrent(
+        _ stream: AddonStream,
+        action: TorrentAction,
+        magnetURL: String,
+        operationID: UUID,
+        engine: TorrentEngine
+    ) async {
         await engine.play(
             magnetLink: magnetURL,
             fileIndex: stream.fileIdx
-        ) { state, progress in
+        ) { state, progress, peers in
+            guard torrentOperationID == operationID else { return }
             torrentState = state
             torrentProgress = progress
+            torrentPeerCount = peers
         }
 
-        if case .ready(let url) = torrentState {
-            playerURL = PlayableURL(url: url)
+        guard torrentOperationID == operationID, !Task.isCancelled else { return }
+
+        switch torrentState {
+        case .ready(let url):
+            if action == .play {
+                playerURL = PlayableURL(url: url)
+            } else {
+                do {
+                    let destination = try saveTorrentDownload(
+                        from: url,
+                        name: downloadName(for: stream)
+                    )
+                    torrentDownloads[stream.id] = destination
+                } catch {
+                    torrentErrors[stream.id] = "Could not save torrent: \(error.localizedDescription)"
+                }
+            }
+
+        case .failed(let message):
+            torrentErrors[stream.id] = message
+
+        default:
+            break
+        }
+
+        finishTorrentOperation(operationID)
+    }
+
+    @MainActor
+    private func cancelActiveTorrent() {
+        guard activeTorrentID != nil else { return }
+
+        torrentTask?.cancel()
+        let engine = torrentEngine
+
+        activeTorrentID = nil
+        activeTorrentAction = nil
+        torrentOperationID = nil
+        torrentTask = nil
+        torrentEngine = nil
+        torrentState = .idle
+        torrentProgress = 0.0
+        torrentPeerCount = 0
+
+        if let engine {
+            Task { @MainActor in
+                await engine.cancel()
+            }
         }
     }
+
+    @MainActor
+    private func finishTorrentOperation(_ operationID: UUID) {
+        guard torrentOperationID == operationID else { return }
+
+        activeTorrentID = nil
+        activeTorrentAction = nil
+        torrentOperationID = nil
+        torrentTask = nil
+        torrentEngine = nil
+        torrentState = .idle
+        torrentProgress = 0.0
+        torrentPeerCount = 0
+    }
+
+    private func saveTorrentDownload(from source: URL, name: String) throws -> URL {
+        let folder = try FileManager.default
+            .url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            .appendingPathComponent("Downloads", isDirectory: true)
+
+        try FileManager.default.createDirectory(
+            at: folder,
+            withIntermediateDirectories: true
+        )
+
+        let cleaned = sanitizeFilename(name)
+        let ext = source.pathExtension.isEmpty ? "mp4" : source.pathExtension.lowercased()
+        var destination = folder.appendingPathComponent("\(cleaned).\(ext)")
+        var counter = 2
+
+        while FileManager.default.fileExists(atPath: destination.path) {
+            destination = folder.appendingPathComponent("\(cleaned) (\(counter)).\(ext)")
+            counter += 1
+        }
+
+        try FileManager.default.copyItem(at: source, to: destination)
+        return destination
+    }
+
+    private func sanitizeFilename(_ value: String) -> String {
+        let invalidCharacters = CharacterSet(charactersIn: "/\\:?%*|\"<>")
+        let cleaned = value
+            .components(separatedBy: invalidCharacters)
+            .joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return cleaned.isEmpty ? "Video" : String(cleaned.prefix(120))
+    }
+}
+
+private enum TorrentAction: Equatable {
+    case play
+    case download
 }
 
 private struct PlayableURL: Identifiable {
