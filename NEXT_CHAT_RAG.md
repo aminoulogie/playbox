@@ -1,5 +1,38 @@
 # Playbox — Next Chat RAG / Handoff
 
+# START HERE — REQUIRED FOR THE NEXT AI CHAT
+
+Before changing any code:
+
+1. Read this entire file.
+2. Fetch the current `main` branch and latest release/build state.
+3. Do **not** redo the old SwiftTorrent investigation.
+4. Do **not** assume Torrentio is installed; verify addon state when a title shows no torrent sources.
+5. Treat the current app-code baseline as the libtorrent + VLC streaming implementation, not the earlier full-download implementation.
+6. The user's immediate priority is **torrent Play behavior**, not more tracker experiments.
+7. After Play behavior is validated/fixed, implement source sorting/filtering with **seeders high → low** as the default.
+
+Latest user-confirmed runtime state:
+
+- Torrentio was reinstalled/configured and torrent sources returned.
+- libtorrent peer discovery is working on-device.
+- A real test showed approximately:
+  - Connected: 8
+  - Known: 214
+  - Candidates: 71
+  - DHT: 111 nodes / 100 peers
+  - active transfer speed visible
+- Therefore, **do not treat peer discovery as the current blocker**.
+- The earlier “Buy / Unsupported stream URL” screen was caused by Torrentio not being installed at that moment, not by a libtorrent regression.
+
+Immediate next engineering task:
+
+> Make sure tapping the torrent **Play** button opens the player immediately and uses the existing libtorrent + VLC growing-file/streaming path. Reuse the already integrated open-source libtorrent/VLCKit method; do not invent another torrent engine. If current v1.0.71 behavior still fails on-device, debug the existing `streamReady` → VLC handoff, buffering, file growth, piece priority/deadlines, and player lifecycle.
+
+Do not merge backend changes until a physical-iPhone Release build passes.
+
+---
+
 > Purpose: give a new ChatGPT/Codex session enough context to continue work on this repository without re-discovering the architecture, repeating old torrent fixes, or reverting successful work.
 >
 > Repository: `aminoulogie/playbox`
