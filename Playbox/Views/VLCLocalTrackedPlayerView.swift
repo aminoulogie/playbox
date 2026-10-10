@@ -169,7 +169,7 @@ final class VLCTorrentPlayerController: NSObject, ObservableObject {
             return
         }
         media.addOptions([
-            "file-caching": 2500,
+            "file-caching": 1000,
             "network-caching": 2500
         ])
         player.media = media
