@@ -189,8 +189,8 @@ final class VLCTorrentPlayerController: NSObject, ObservableObject {
                 if self.player.state == .playing {
                     self.isOpening = false
 
-                    if let resume = self.pendingResumeMilliseconds,
-                       let resumeTime = VLCTime(int: Int32(clamping: resume)) {
+                    if let resume = self.pendingResumeMilliseconds {
+                        let resumeTime = VLCTime(int: Int32(clamping: resume))
                         self.player.time = resumeTime
                         self.pendingResumeMilliseconds = nil
                     }
