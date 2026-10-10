@@ -14,6 +14,8 @@ struct DetailView: View {
     @State private var showUnsupported = false
     @State private var selectedEpisodeID: String?
     @State private var isLoadingSources = false
+    @State private var torrentEngine: TorrentEngine?
+    @State private var torrentState: TorrentEngine.EngineState = .idle
     private let cinemeta = URL(string: "https://v3-cinemeta.strem.io")!
 
     var body: some View {
@@ -128,7 +130,8 @@ struct DetailView: View {
     }
 
     private var playableStreams: [AddonStream] { streams.filter { $0.playableURL != nil } }
-    private var unsupportedStreams: [AddonStream] { streams.filter { $0.playableURL == nil } }
+    private var torrentStreams: [AddonStream] { streams.filter { $0.isTorrent } }
+    private var unsupportedStreams: [AddonStream] { streams.filter { $0.playableURL == nil && !$0.isTorrent } }
 
     private var sources: some View {
         Section(selectedEpisodeID == nil && item.type == "series" ? "Sources" : "Play") {
@@ -136,10 +139,16 @@ struct DetailView: View {
                 ContentUnavailableView("Choose an episode", systemImage: "rectangle.stack", description: Text("Select an episode above to find its available sources."))
             } else if isLoadingSources {
                 HStack { Spacer(); ProgressView("Finding sources…"); Spacer() }
+            } else if case .downloading = torrentState {
+                HStack { Spacer(); ProgressView("Downloading torrent…"); Spacer() }
+            } else if case .resolving = torrentState {
+                HStack { Spacer(); ProgressView("Resolving magnet link…"); Spacer() }
+            } else if case .failed(let error) = torrentState {
+                ContentUnavailableView("Torrent failed", systemImage: "exclamationmark.triangle", description: Text(error))
             } else if streams.isEmpty {
                 ContentUnavailableView("No sources", systemImage: "play.slash", description: Text("No installed add-on returned a source for this title."))
-            } else if playableStreams.isEmpty {
-                ContentUnavailableView("No direct stream available", systemImage: "play.slash", description: Text("\(unsupportedStreams.count) source(s) were found, but they are torrent/magnet or otherwise unsupported by the iOS player."))
+            } else if playableStreams.isEmpty && torrentStreams.isEmpty {
+                ContentUnavailableView("No playable source available", systemImage: "play.slash", description: Text("\(unsupportedStreams.count) source(s) were found, but they are not directly playable."))
             }
 
             ForEach(playableStreams) { stream in
@@ -150,6 +159,22 @@ struct DetailView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(stream.quality).font(.headline)
                             Text(stream.title ?? stream.name ?? "Direct stream").font(.caption).lineLimit(2)
+                            Text(stream.sourceSummary).font(.caption2).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "play.circle.fill").font(.title2)
+                    }
+                }
+            }
+
+            ForEach(torrentStreams) { stream in
+                Button {
+                    Task { await playTorrent(stream) }
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(stream.quality).font(.headline)
+                            Text(stream.title ?? stream.name ?? "Torrent source").font(.caption).lineLimit(2)
                             Text(stream.sourceSummary).font(.caption2).foregroundStyle(.secondary)
                         }
                         Spacer()
@@ -213,9 +238,34 @@ struct DetailView: View {
         }
         streams = Array(Set(foundStreams)).sorted {
             if ($0.playableURL != nil) != ($1.playableURL != nil) { return $0.playableURL != nil }
+            if $0.isTorrent != $1.isTorrent { return !$0.isTorrent }
             return $0.qualityRank > $1.qualityRank
         }
         subtitles = Array(Set(foundSubtitles)).sorted { ($0.lang ?? "") < ($1.lang ?? "") }
+    }
+
+    private func playTorrent(_ stream: AddonStream) async {
+        let engine = TorrentEngine()
+        torrentEngine = engine
+        torrentState = .idle
+
+        let magnetURL: String
+        if let url = stream.url, !url.isEmpty {
+            magnetURL = url
+        } else if let hash = stream.infoHash {
+            magnetURL = "magnet:?xt=urn:btih:\(hash)"
+        } else {
+            torrentState = .failed("No magnet URL was supplied for this torrent source")
+            return
+        }
+
+        await engine.play(magnetLink: magnetURL)
+        let nextState = await engine.state
+        torrentState = nextState
+
+        if case .ready(let url) = nextState {
+            playerURL = PlayableURL(url: url)
+        }
     }
 }
 
