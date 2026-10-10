@@ -91,7 +91,13 @@ def main() -> None:
             throw TrackerError.invalidURL
         }
 
-        let (data, _) = try await URLSession.shared.data(from: url)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 4
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse,
+              200..<300 ~= http.statusCode else {
+            throw TrackerError.invalidResponse
+        }
         return try parseAnnounceResponse(data)
     }
 ''',
@@ -131,48 +137,82 @@ def main() -> None:
     }
 ''',
         '''    public func announce(params: AnnounceParams) async throws -> AnnounceResponse {
-        var firstSuccessfulResponse: AnnounceResponse?
+        let urls = tiers.flatMap { $0 }
+        let eventLoopGroup = group
 
-        for tier in tiers {
-            for urlString in tier {
-                do {
-                    let response: AnnounceResponse
-                    if urlString.hasPrefix("http://") || urlString.hasPrefix("https://") {
-                        let tracker = HTTPTracker(announceURL: urlString)
-                        response = try await tracker.announce(params: params)
-                    } else if urlString.hasPrefix("udp://") {
-                        guard let components = URLComponents(string: urlString),
-                              let host = components.host,
-                              let port = components.port else {
-                            continue
+        // Query every tracker concurrently. Stopping at the first non-empty tracker
+        // can leave us with only a handful of stale peers while better trackers are
+        // never consulted.
+        let responses = await withTaskGroup(
+            of: AnnounceResponse?.self,
+            returning: [AnnounceResponse].self
+        ) { taskGroup in
+            for urlString in urls {
+                taskGroup.addTask {
+                    do {
+                        if urlString.hasPrefix("http://") || urlString.hasPrefix("https://") {
+                            let tracker = HTTPTracker(announceURL: urlString)
+                            return try await tracker.announce(params: params)
                         }
-                        let tracker = UDPTracker(host: host, port: port, group: group)
-                        response = try await tracker.announce(params: params)
-                    } else {
-                        continue
-                    }
 
-                    lastResponse = response
-                    announceInterval = response.interval
-                    if firstSuccessfulResponse == nil {
-                        firstSuccessfulResponse = response
-                    }
+                        if urlString.hasPrefix("udp://"),
+                           let components = URLComponents(string: urlString),
+                           let host = components.host,
+                           let port = components.port {
+                            let tracker = UDPTracker(
+                                host: host,
+                                port: port,
+                                group: eventLoopGroup
+                            )
+                            return try await tracker.announce(params: params)
+                        }
 
-                    // A tracker can successfully announce while returning no peers.
-                    // Keep trying the remaining trackers until one returns candidates.
-                    if !response.peers.isEmpty {
-                        return response
+                        return nil
+                    } catch {
+                        return nil
                     }
-                } catch {
-                    continue // Try next tracker in tier
                 }
+            }
+
+            var collected: [AnnounceResponse] = []
+            for await response in taskGroup {
+                if let response {
+                    collected.append(response)
+                }
+            }
+            return collected
+        }
+
+        guard !responses.isEmpty else {
+            throw TrackerError.connectionFailed
+        }
+
+        var seen = Set<String>()
+        var peers: [(String, UInt16)] = []
+        for response in responses {
+            for (address, port) in response.peers {
+                let key = "\(address):\(port)"
+                guard seen.insert(key).inserted else { continue }
+                peers.append((address, port))
             }
         }
 
-        if let response = firstSuccessfulResponse {
-            return response
-        }
-        throw TrackerError.connectionFailed
+        let interval = responses
+            .map(\.interval)
+            .filter { $0 > 0 }
+            .min() ?? 1800
+        let seeders = responses.map(\.seeders).max() ?? 0
+        let leechers = responses.map(\.leechers).max() ?? 0
+
+        let combined = AnnounceResponse(
+            interval: interval,
+            seeders: seeders,
+            leechers: leechers,
+            peers: peers
+        )
+        lastResponse = combined
+        announceInterval = interval
+        return combined
     }
 ''',
         "tracker fallback when an announce returns zero peers",
