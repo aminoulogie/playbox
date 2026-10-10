@@ -168,11 +168,17 @@ final class TorrentEngine: ObservableObject {
                         )
                         return
 
-                    case .streamReady:
-                        // The current native bridge does not emit this event yet.
-                        // Keep the API forward-compatible without marking a partial
-                        // file as ready for the Download button.
-                        break
+                    case .streamReady(let readiness):
+                        selectedFileIndex = readiness.primaryFileIndex
+                        update(
+                            .ready(readiness.fileURL),
+                            progress: progress,
+                            peers: peerCount,
+                            diagnostics: "Streaming buffer ready · \(Self.formatBytes(readiness.bytesAvailable)) buffered",
+                            onUpdate: onUpdate
+                        )
+                        // Do not return. libtorrent must keep downloading while
+                        // the VLC player reads the growing local file.
                     }
                 }
 
@@ -350,6 +356,12 @@ final class TorrentEngine: ObservableObject {
         default:
             false
         }
+    }
+
+    private static func formatBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
     }
 
     private static func formatSpeed(_ bytesPerSecond: Double) -> String {
