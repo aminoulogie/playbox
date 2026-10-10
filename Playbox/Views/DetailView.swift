@@ -17,6 +17,7 @@ struct DetailView: View {
     @State private var isLoadingSources = false
     @State private var torrentEngine: TorrentEngine?
     @State private var torrentState: TorrentEngine.EngineState = .idle
+    @State private var torrentProgress: Double = 0.0
     private let cinemeta = URL(string: "https://v3-cinemeta.strem.io")!
 
     var body: some View {
@@ -141,7 +142,13 @@ struct DetailView: View {
             } else if isLoadingSources {
                 HStack { Spacer(); ProgressView("Finding sources…"); Spacer() }
             } else if case .downloading = torrentState {
-                HStack { Spacer(); ProgressView("Downloading torrent…"); Spacer() }
+                HStack(spacing: 12) {
+                    Spacer()
+                    ProgressView(value: torrentProgress)
+                        .frame(width: 44)
+                    Text("Downloading torrent… \(Int(torrentProgress * 100))%")
+                    Spacer()
+                }
             } else if case .resolving = torrentState {
                 HStack { Spacer(); ProgressView("Resolving magnet link…"); Spacer() }
             } else if case .failed(let error) = torrentState {
@@ -345,21 +352,24 @@ struct DetailView: View {
         torrentEngine = engine
         torrentState = .idle
 
-        let magnetURL: String
-        if let url = stream.url, !url.isEmpty {
-            magnetURL = url
-        } else if let hash = stream.infoHash {
-            magnetURL = "magnet:?xt=urn:btih:\(hash)"
-        } else {
-            torrentState = .failed("No magnet URL was supplied for this torrent source")
+        guard let magnetURL = stream.torrentMagnetURI else {
+            torrentState = .failed("No magnet URL or info hash was supplied for this torrent source")
+            torrentProgress = 0.0
             return
         }
 
-        await engine.play(magnetLink: magnetURL)
-        let nextState = await engine.state
-        torrentState = nextState
+        torrentState = .resolving
+        torrentProgress = 0.0
 
-        if case .ready(let url) = nextState {
+        await engine.play(
+            magnetLink: magnetURL,
+            fileIndex: stream.fileIdx
+        ) { state, progress in
+            torrentState = state
+            torrentProgress = progress
+        }
+
+        if case .ready(let url) = torrentState {
             playerURL = PlayableURL(url: url)
         }
     }
