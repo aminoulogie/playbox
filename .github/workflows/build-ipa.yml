@@ -40,7 +40,7 @@ jobs:
             VERSION="1.0.${GITHUB_RUN_NUMBER}"
           fi
 
-          if [[ ! "$VERSION" =~ ^[0-9]+(.[0-9]+){1,2}$ ]]; then
+          if [[ ! "$VERSION" =~ ^[0-9]+([.][0-9]+){1,2}$ ]]; then
             echo "Invalid release version: $VERSION"
             echo "Use a numeric version such as 1.0.72."
             exit 1
