@@ -13,6 +13,10 @@ final class TorrentEngine: ObservableObject {
     @Published private(set) var state: EngineState = .idle
     @Published private(set) var progress: Double = 0.0
     @Published private(set) var peerCount: Int = 0
+    @Published private(set) var downloadSpeed: Double = 0
+    @Published private(set) var cacheProgress: Double = 0
+    @Published private(set) var bufferedBytes: Int64 = 0
+    @Published private(set) var bufferTargetBytes: Int64 = 0
     @Published private(set) var diagnosticText: String = "libtorrent starting…"
 
     private var session: (any LibtorrentSession)?
@@ -32,7 +36,7 @@ final class TorrentEngine: ObservableObject {
     func play(
         magnetLink raw: String,
         fileIndex: Int? = nil,
-        onUpdate: ((EngineState, Double, Int, String) -> Void)? = nil
+        onUpdate: ((EngineState, Double, Int, Double, Double, String) -> Void)? = nil
     ) async {
         await stopCurrentJob()
 
@@ -174,6 +178,8 @@ final class TorrentEngine: ObservableObject {
                             .ready(readiness.fileURL),
                             progress: progress,
                             peers: peerCount,
+                            speed: downloadSpeed,
+                            cacheProgress: 1,
                             diagnostics: "Streaming buffer ready · \(Self.formatBytes(readiness.bytesAvailable)) buffered",
                             onUpdate: onUpdate
                         )
@@ -217,6 +223,10 @@ final class TorrentEngine: ObservableObject {
         state = .idle
         progress = 0
         peerCount = 0
+        downloadSpeed = 0
+        cacheProgress = 0
+        bufferedBytes = 0
+        bufferTargetBytes = 0
         diagnosticText = "libtorrent stopped"
     }
 
@@ -273,7 +283,7 @@ final class TorrentEngine: ObservableObject {
     private func publish(
         _ snapshot: LibtorrentProgress,
         resolving: Bool,
-        onUpdate: ((EngineState, Double, Int, String) -> Void)?
+        onUpdate: ((EngineState, Double, Int, Double, Double, String) -> Void)?
     ) {
         let fileProgress: Double?
         if let file = selectedVideoFile(in: snapshot.files),
@@ -289,11 +299,24 @@ final class TorrentEngine: ObservableObject {
         let peers = snapshot.peerCount
             ?? snapshot.swarmDiagnostics?.connectedPeers
             ?? 0
+        let speed = max(0, snapshot.bytesPerSecond ?? 0)
+        let buffered = max(0, snapshot.streamingBufferedBytes ?? 0)
+        let target = max(0, snapshot.streamingBufferTargetBytes ?? 0)
+        let startupProgress = target > 0
+            ? min(max(Double(buffered) / Double(target), 0), 1)
+            : 0
+
+        downloadSpeed = speed
+        bufferedBytes = buffered
+        bufferTargetBytes = target
+        cacheProgress = startupProgress
 
         update(
             resolving ? .resolving : .downloading,
             progress: normalizedProgress,
             peers: peers,
+            speed: speed,
+            cacheProgress: startupProgress,
             diagnostics: diagnostics(for: snapshot),
             onUpdate: onUpdate
         )
@@ -339,14 +362,18 @@ final class TorrentEngine: ObservableObject {
         _ nextState: EngineState,
         progress nextProgress: Double,
         peers: Int,
+        speed: Double = 0,
+        cacheProgress nextCacheProgress: Double = 0,
         diagnostics: String,
-        onUpdate: ((EngineState, Double, Int, String) -> Void)?
+        onUpdate: ((EngineState, Double, Int, Double, Double, String) -> Void)?
     ) {
         state = nextState
         progress = nextProgress
         peerCount = peers
+        downloadSpeed = speed
+        cacheProgress = nextCacheProgress
         diagnosticText = diagnostics
-        onUpdate?(nextState, nextProgress, peers, diagnostics)
+        onUpdate?(nextState, nextProgress, peers, speed, nextCacheProgress, diagnostics)
     }
 
     private static func isSupportedVideo(_ path: String) -> Bool {

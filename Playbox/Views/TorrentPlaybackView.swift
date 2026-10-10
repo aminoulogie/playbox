@@ -16,21 +16,36 @@ struct TorrentPlaybackView: View {
                     .ignoresSafeArea()
             } else {
                 VStack(spacing: 18) {
-                    ProgressView()
-                        .controlSize(.large)
-                        .tint(.white)
+                    ZStack {
+                        Circle()
+                            .stroke(.white.opacity(0.18), lineWidth: 8)
+                        Circle()
+                            .trim(from: 0, to: max(0.001, engine.cacheProgress))
+                            .stroke(.white, style: StrokeStyle(lineWidth: 8, lineCap: .round))
+                            .rotationEffect(.degrees(-90))
+                            .animation(.linear(duration: 0.1), value: engine.cacheProgress)
+                    }
+                    .frame(width: 116, height: 116)
 
-                    Text(statusTitle)
+                    Text("Cache loading")
                         .font(.headline)
+                        .foregroundStyle(.white.opacity(0.78))
+
+                    Text(String(format: "%.2f%%", engine.cacheProgress * 100))
+                        .font(.system(size: 42, weight: .bold, design: .rounded))
+                        .monospacedDigit()
                         .foregroundStyle(.white)
 
-                    if engine.progress > 0 {
-                        ProgressView(value: engine.progress)
-                            .tint(.white)
-                            .frame(maxWidth: 280)
-                    }
+                    Text(formatSpeed(engine.downloadSpeed))
+                        .font(.title3)
+                        .monospacedDigit()
+                        .foregroundStyle(.white.opacity(0.9))
 
-                    Text("\(Int(engine.progress * 100))% · \(engine.peerCount) peers")
+                    Text(statusTitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.78))
+
+                    Text("Downloaded: \(String(format: "%.2f", engine.progress * 100))% · \(engine.peerCount) peers")
                         .font(.subheadline)
                         .monospacedDigit()
                         .foregroundStyle(.white.opacity(0.85))
@@ -57,6 +72,16 @@ struct TorrentPlaybackView: View {
                 streamURL = url
             }
         }
+    }
+
+    private func formatSpeed(_ bytesPerSecond: Double) -> String {
+        guard bytesPerSecond > 0 else { return "0 B/s" }
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        formatter.includesUnit = true
+        formatter.isAdaptive = true
+        return formatter.string(fromByteCount: Int64(bytesPerSecond)) + "/s"
     }
 
     private var statusTitle: String {

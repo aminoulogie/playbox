@@ -1541,7 +1541,7 @@ private:
 
     void pump_progress() {
         while (!stopping_.load()) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
             process_alerts();
 
             std::vector<std::pair<std::string, lt::torrent_handle>> snapshot;
@@ -1602,7 +1602,7 @@ private:
         const auto available = contiguous_file_bytes(handle, file_index);
         const std::int64_t startup_target = std::min<std::int64_t>(
             file_size,
-            12LL * 1024LL * 1024LL
+            2LL * 1024LL * 1024LL
         );
 
         const std::string relative_path = files.file_path(index);
@@ -1666,6 +1666,28 @@ private:
         json << "\"totalBytesPerSecond\":" << status.download_rate << ",";
         json << "\"protocolBytesPerSecond\":"
              << std::max(0, status.download_rate - status.download_payload_rate) << ",";
+
+        std::int64_t streaming_buffered_bytes = 0;
+        std::int64_t streaming_buffer_target_bytes = 0;
+        {
+            std::lock_guard<std::mutex> guard(lock_);
+            const auto iterator = jobs_.find(job_id);
+            if (iterator != jobs_.end() && iterator->second.primary_file_index.has_value()) {
+                const int primary = *iterator->second.primary_file_index;
+                streaming_buffered_bytes = contiguous_file_bytes(handle, primary);
+                if (const auto info = handle.torrent_file()) {
+                    const auto &files = info->files();
+                    if (primary >= 0 && primary < files.num_files()) {
+                        streaming_buffer_target_bytes = std::min<std::int64_t>(
+                            files.file_size(lt::file_index_t{primary}),
+                            2LL * 1024LL * 1024LL
+                        );
+                    }
+                }
+            }
+        }
+        json << "\"streamingBufferedBytes\":" << streaming_buffered_bytes << ",";
+        json << "\"streamingBufferTargetBytes\":" << streaming_buffer_target_bytes << ",";
         json << "\"peerCount\":" << status.num_peers << ",";
         json << "\"swarmDiagnostics\":";
         emit_swarm_diagnostics_json(json, job_id, handle, status);
