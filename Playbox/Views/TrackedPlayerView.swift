@@ -15,8 +15,12 @@ struct TrackedPlayerView: View {
             VideoPlayer(player: player).ignoresSafeArea()
             if isLoading && errorMessage == nil { ProgressView().controlSize(.large) }
             if let errorMessage {
-                ContentUnavailableView("Playback failed", systemImage: "exclamationmark.triangle", description: Text(errorMessage))
-                    .padding().background(.ultraThinMaterial)
+                VStack(spacing: 14) {
+                    ContentUnavailableView("Playback failed", systemImage: "exclamationmark.triangle", description: Text(errorMessage))
+                    Button("Try Again") { Task { await startPlayback() } }
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding().background(.ultraThinMaterial)
             }
         }
         .task { await startPlayback() }
@@ -27,6 +31,8 @@ struct TrackedPlayerView: View {
     private func startPlayback() async {
         errorMessage = nil
         isLoading = true
+        if let observer { player.removeTimeObserver(observer); self.observer = nil }
+        player.replaceCurrentItem(with: nil)
         let asset = AVURLAsset(url: url)
         do {
             let playable = try await asset.load(.isPlayable)
@@ -47,7 +53,12 @@ struct TrackedPlayerView: View {
             isLoading = false
         } catch {
             isLoading = false
-            errorMessage = error.localizedDescription
+            let ns = error as NSError
+            if ns.domain == AVFoundationErrorDomain || error.localizedDescription.localizedCaseInsensitiveContains("operation stopped") {
+                errorMessage = "The server stopped this stream before iOS could open it. Try again or choose another direct source."
+            } else {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
