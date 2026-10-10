@@ -96,9 +96,18 @@ struct AddonStream: Codable, Identifiable, Hashable {
     }
 
     var playableURL: URL? {
-        guard let url, let value = URL(string: url),
+        guard let raw = url?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return nil }
+        let encoded = raw.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? raw
+        guard let value = URL(string: encoded),
               ["http", "https"].contains(value.scheme?.lowercased() ?? "") else { return nil }
         return value
+    }
+
+    var playbackStatus: String {
+        if playableURL != nil { return "Direct stream · Tap to play" }
+        if isTorrent { return "Torrent/magnet source · not directly playable" }
+        return "Unsupported stream URL"
     }
 
     var isTorrent: Bool {
@@ -133,7 +142,7 @@ struct AddonStream: Codable, Identifiable, Hashable {
     }
 
     var fileSize: String? {
-        let pattern = #"(?i)(\\d+(?:\\.\\d+)?)\\s*(GB|MB)"#
+        let pattern = #"(?i)(\d+(?:\.\d+)?)\s*(GB|MB)"#
         guard let regex = try? NSRegularExpression(pattern: pattern),
               let match = regex.firstMatch(in: sourceText, range: NSRange(sourceText.startIndex..., in: sourceText)),
               let valueRange = Range(match.range(at: 1), in: sourceText),
