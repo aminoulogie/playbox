@@ -6,7 +6,7 @@
 >
 > Default branch: `main`
 >
-> Current main commit when this file was created: `21195efe37d8c7e73ded3bc1281acdb1f24781b5`
+> Current application-code baseline referenced by this handoff: `21195efe37d8c7e73ded3bc1281acdb1f24781b5` (the handoff file itself was committed immediately afterward on `main`).
 >
 > Latest published IPA when this file was created: **v1.0.71**
 >
