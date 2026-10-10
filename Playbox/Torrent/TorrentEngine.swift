@@ -12,6 +12,7 @@ final class TorrentEngine: ObservableObject {
     }
 
     @Published private(set) var state: EngineState = .idle
+    @Published private(set) var progress: Double = 0.0
 
     private var session: Session?
     private var currentHandle: TorrentHandle?
@@ -25,6 +26,7 @@ final class TorrentEngine: ObservableObject {
 
     func play(magnetLink raw: String) async {
         state = .resolving
+        progress = 0.0
         do {
             let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !value.isEmpty else {
@@ -54,12 +56,14 @@ final class TorrentEngine: ObservableObject {
 
             guard let file else {
                 state = .failed("No supported video file was found in this torrent")
+                progress = 0.0
                 return
             }
 
             var finished = false
             while !finished {
                 let status = await handle.status()
+                progress = max(0, min(status.progress, 1.0))
                 finished = status.progress >= 1.0 || status.state == .seeding
                 if !finished {
                     try await Task.sleep(nanoseconds: 1_000_000_000)
@@ -68,8 +72,10 @@ final class TorrentEngine: ObservableObject {
 
             let localURL = cacheDirectory.appendingPathComponent(file.path)
             state = .ready(localURL)
+            progress = 1.0
         } catch {
             state = .failed(error.localizedDescription)
+            progress = 0.0
         }
     }
 
@@ -87,6 +93,7 @@ final class TorrentEngine: ObservableObject {
         }
         currentHandle = nil
         session = nil
+        progress = 0.0
     }
 
     deinit {
