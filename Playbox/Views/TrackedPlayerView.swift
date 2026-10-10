@@ -17,8 +17,12 @@ struct TrackedPlayerView: View {
     @State private var lastSpeedUpdate: Date = Date()
     @State private var progressTask: Task<Void, Never>?
 
+    @ViewBuilder
     var body: some View {
-        ZStack {
+        if url.isFileURL {
+            VLCLocalTrackedPlayerView(url: url, item: item)
+        } else {
+            ZStack {
             VideoPlayer(player: player).ignoresSafeArea()
 
             if isLoading && errorMessage == nil {
@@ -74,8 +78,9 @@ struct TrackedPlayerView: View {
                 .padding().background(.ultraThinMaterial)
             }
         }
-        .task { await startPlayback() }
-        .onDisappear { stopPlayback() }
+            .task { await startPlayback() }
+            .onDisappear { stopPlayback() }
+        }
     }
 
     @MainActor
