@@ -13,6 +13,7 @@ final class TorrentEngine: ObservableObject {
 
     @Published private(set) var state: EngineState = .idle
     @Published private(set) var progress: Double = 0.0
+    @Published private(set) var peerCount: Int = 0
 
     private var session: Session?
     private var currentHandle: TorrentHandle?
@@ -27,57 +28,55 @@ final class TorrentEngine: ObservableObject {
     func play(
         magnetLink raw: String,
         fileIndex: Int? = nil,
-        onUpdate: ((EngineState, Double) -> Void)? = nil
+        onUpdate: ((EngineState, Double, Int) -> Void)? = nil
     ) async {
-        update(.resolving, progress: 0.0, onUpdate: onUpdate)
+        await shutdownSession()
+        update(.resolving, progress: 0.0, peers: 0, onUpdate: onUpdate)
 
         do {
+            try Task.checkCancellation()
+
             let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !value.isEmpty else {
-                throw NSError(
-                    domain: "TorrentEngine",
-                    code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: "Empty magnet URL"]
-                )
+                throw EngineError.message("Empty magnet URL")
             }
 
+            // SwiftTorrent's current DHT node is not connected to TorrentHandle peer
+            // discovery. Disable it here to avoid binding a second fixed UDP port;
+            // tracker URLs from the Stremio stream are the active peer source.
             let session = Session(settings: SessionSettings(
                 listenPort: 6881,
-                dhtEnabled: true,
+                dhtEnabled: false,
                 savePath: cacheDirectory.path
             ))
             self.session = session
-
-            try await session.startDHT()
 
             let params = try AddTorrentParams.fromMagnet(value, savePath: cacheDirectory.path)
             let handle = try await session.addTorrent(params)
             currentHandle = handle
 
             try await handle.start()
-            update(.downloading, progress: 0.0, onUpdate: onUpdate)
 
-            let info = try await handle.waitForMetadata(timeout: 60)
-            let file = selectVideoFile(from: info.files, preferredIndex: fileIndex)
+            let files = try await waitForFiles(handle: handle, onUpdate: onUpdate)
+            try Task.checkCancellation()
 
-            guard let file else {
-                update(
-                    .failed("No supported video file was found in this torrent"),
-                    progress: 0.0,
-                    onUpdate: onUpdate
-                )
-                return
+            guard let file = selectVideoFile(from: files, preferredIndex: fileIndex) else {
+                throw EngineError.message("No supported video file was found in this torrent")
             }
 
             var finished = false
             while !finished {
+                try Task.checkCancellation()
+
                 let status = await handle.status()
                 let currentProgress = max(0, min(status.progress, 1.0))
+                let peers = status.numPeers
                 finished = currentProgress >= 1.0 || status.state == .seeding
 
                 update(
                     .downloading,
                     progress: currentProgress,
+                    peers: peers,
                     onUpdate: onUpdate
                 )
 
@@ -88,18 +87,27 @@ final class TorrentEngine: ObservableObject {
 
             let localURL = cacheDirectory.appendingPathComponent(file.path)
             guard FileManager.default.fileExists(atPath: localURL.path) else {
-                update(
-                    .failed("The torrent finished, but the selected video file is missing from the cache"),
-                    progress: 0.0,
-                    onUpdate: onUpdate
+                throw EngineError.message(
+                    "The torrent finished, but the selected video file is missing from the cache"
                 )
-                return
             }
 
-            update(.ready(localURL), progress: 1.0, onUpdate: onUpdate)
+            await shutdownSession()
+            update(.ready(localURL), progress: 1.0, peers: peerCount, onUpdate: onUpdate)
+        } catch is CancellationError {
+            await shutdownSession()
+            update(.idle, progress: 0.0, peers: 0, onUpdate: onUpdate)
         } catch {
-            update(.failed(error.localizedDescription), progress: 0.0, onUpdate: onUpdate)
+            await shutdownSession()
+            update(.failed(error.localizedDescription), progress: 0.0, peers: 0, onUpdate: onUpdate)
         }
+    }
+
+    func cancel() async {
+        await shutdownSession()
+        state = .idle
+        progress = 0.0
+        peerCount = 0
     }
 
     func playableURL() -> URL? {
@@ -107,16 +115,44 @@ final class TorrentEngine: ObservableObject {
         return nil
     }
 
-    func cleanup() async {
-        if let handle = currentHandle {
-            await session?.removeTorrent(await handle.infoHash, deleteFiles: false)
+    private func waitForFiles(
+        handle: TorrentHandle,
+        onUpdate: ((EngineState, Double, Int) -> Void)?
+    ) async throws -> [TorrentInfo.FileEntry] {
+        for second in 0..<60 {
+            try Task.checkCancellation()
+
+            if let files = await handle.getFiles(), !files.isEmpty {
+                return files
+            }
+
+            let status = await handle.status()
+            update(.resolving, progress: 0.0, peers: status.numPeers, onUpdate: onUpdate)
+
+            if second == 30, status.numPeers == 0 {
+                // Continue trying until the full timeout, but surface a more useful
+                // state through peerCount instead of appearing frozen.
+            }
+
+            try await Task.sleep(for: .seconds(1))
         }
-        if let session = session {
+
+        throw EngineError.message(
+            peerCount == 0
+                ? "No peers returned metadata. Check that this torrent has working tracker sources."
+                : "Connected to peers, but torrent metadata did not arrive within 60 seconds."
+        )
+    }
+
+    private func shutdownSession() async {
+        if let handle = currentHandle, let session {
+            await session.removeTorrent(await handle.infoHash, deleteFiles: false)
+        }
+        if let session {
             try? await session.shutdown()
         }
         currentHandle = nil
-        session = nil
-        progress = 0.0
+        self.session = nil
     }
 
     private func selectVideoFile(
@@ -148,14 +184,23 @@ final class TorrentEngine: ObservableObject {
     private func update(
         _ nextState: EngineState,
         progress nextProgress: Double,
-        onUpdate: ((EngineState, Double) -> Void)?
+        peers: Int,
+        onUpdate: ((EngineState, Double, Int) -> Void)?
     ) {
         state = nextState
         progress = nextProgress
-        onUpdate?(nextState, nextProgress)
+        peerCount = peers
+        onUpdate?(nextState, nextProgress, peers)
     }
 
-    deinit {
-        Task { await cleanup() }
+    private enum EngineError: LocalizedError {
+        case message(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .message(let message):
+                return message
+            }
+        }
     }
 }
