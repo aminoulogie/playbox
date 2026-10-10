@@ -6,10 +6,16 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
+packages:
+  VideoPlayer:
+    url: https://github.com/wxxsw/VideoPlayer
+    branch: master
 targets:
   Playbox:
     type: application
     platform: iOS
+    dependencies:
+      - package: VideoPlayer
     sources:
       - path: Playbox
     settings:
