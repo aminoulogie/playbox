@@ -25,6 +25,9 @@ def main() -> None:
     http_tracker = root / "Sources/SwiftTorrent/Tracker/HTTPTracker.swift"
     tracker_manager = root / "Sources/SwiftTorrent/Tracker/TrackerManager.swift"
     peer_connection = root / "Sources/SwiftTorrent/Peer/PeerConnection.swift"
+    torrent_handle = root / "Sources/SwiftTorrent/Session/TorrentHandle.swift"
+    session = root / "Sources/SwiftTorrent/Session/Session.swift"
+    dht_node = root / "Sources/SwiftTorrent/DHT/DHTNode.swift"
 
     replace_exact(
         http_tracker,
@@ -211,7 +214,138 @@ def main() -> None:
         "wait for remote peer handshake",
     )
 
-    print("SwiftTorrent peer-discovery patches applied successfully")
+    replace_exact(
+        torrent_handle,
+        '''    /// Returns the file entries for this torrent, or nil if metadata is not yet available.
+    public func getFiles() -> [TorrentInfo.FileEntry]? {
+        info?.files
+    }
+''',
+        '''    /// Feed a peer discovered outside the tracker path (for example DHT)
+    /// into the same peer manager used by tracker announces.
+    internal func addDiscoveredPeer(address: String, port: UInt16) async {
+        await peerManager.addPeer(address: address, port: port)
+    }
+
+    /// Returns the file entries for this torrent, or nil if metadata is not yet available.
+    public func getFiles() -> [TorrentInfo.FileEntry]? {
+        info?.files
+    }
+''',
+        "allow DHT peers to enter TorrentHandle",
+    )
+
+    replace_exact(
+        session,
+        '''    /// Start DHT if enabled.
+    public func startDHT() async throws {
+        guard settings.dhtEnabled else { return }
+        let node = DHTNode(port: settings.dhtPort, group: group)
+        try await node.start()
+        self.dhtNode = node
+    }
+''',
+        '''    /// Start DHT if enabled.
+    public func startDHT() async throws {
+        guard settings.dhtEnabled else { return }
+        guard dhtNode == nil else { return }
+
+        let node = DHTNode(port: settings.dhtPort, group: group)
+        try await node.start()
+        self.dhtNode = node
+    }
+
+    /// Discover peers for an active torrent through BEP-5 DHT and feed them
+    /// into its TorrentHandle. Trackers continue running in parallel.
+    @discardableResult
+    public func discoverPeers(for infoHash: InfoHash) async -> Int {
+        guard settings.dhtEnabled,
+              let node = dhtNode,
+              let handle = torrents[infoHash] else {
+            return 0
+        }
+
+        // Bootstrap responses arrive asynchronously. Give the routing table a
+        // short window to receive at least one node before starting traversal.
+        for _ in 0..<10 {
+            if Task.isCancelled { return 0 }
+            if await node.nodeCount() > 0 { break }
+            try? await Task.sleep(for: .milliseconds(300))
+        }
+
+        if Task.isCancelled { return 0 }
+
+        let traversal = DHTTraversal(dhtNode: node)
+        guard let peers = try? await traversal.getPeers(infoHash: infoHash) else {
+            return 0
+        }
+
+        if Task.isCancelled { return 0 }
+
+        var seen = Set<String>()
+        var added = 0
+        for (address, port) in peers {
+            let key = "\\(address):\\(port)"
+            guard seen.insert(key).inserted else { continue }
+            await handle.addDiscoveredPeer(address: address, port: port)
+            added += 1
+        }
+        return added
+    }
+''',
+        "wire DHT traversal into active torrents",
+    )
+
+    replace_exact(
+        dht_node,
+        '''    /// Bootstrap by contacting well-known DHT nodes.
+    private func bootstrap() async {
+''',
+        '''    /// Stop the DHT socket so sessions can be cancelled/restarted safely.
+    public func stop() async throws {
+        if let channel {
+            try await channel.close().get()
+            self.channel = nil
+        }
+        responseHandler = nil
+
+        let pending = pendingQueries
+        pendingQueries.removeAll()
+        for (_, continuation) in pending {
+            continuation.resume(throwing: CancellationError())
+        }
+    }
+
+    /// Bootstrap by contacting well-known nodes
+    private func bootstrap() async {
+''',
+        "add DHT socket shutdown",
+    )
+
+    replace_exact(
+        session,
+        '''    /// Shutdown the session.
+    public func shutdown() async throws {
+        await pauseAll()
+        alertContinuation.finish()
+        try await group.shutdownGracefully()
+    }
+''',
+        '''    /// Shutdown the session.
+    public func shutdown() async throws {
+        await pauseAll()
+        if let dhtNode {
+            try? await dhtNode.stop()
+            self.dhtNode = nil
+        }
+        alertContinuation.finish()
+        try await group.shutdownGracefully()
+    }
+''',
+        "stop DHT before session shutdown",
+    )
+
+    print("SwiftTorrent peer-discovery and DHT patches applied successfully")
 
 
 if __name__ == "__main__":
