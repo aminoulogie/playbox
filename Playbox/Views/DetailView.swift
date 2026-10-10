@@ -1,5 +1,4 @@
 import SwiftUI
-import VideoPlayer
 
 struct DetailView: View {
     @EnvironmentObject private var store: AddonStore
