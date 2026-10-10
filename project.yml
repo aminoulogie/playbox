@@ -6,6 +6,10 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
+packages:
+  VLCKit:
+    url: https://github.com/videolan/vlckit.git
+    revision: 2e0868f5ed40fe59cd92f377645fdcc260c6e759
 targets:
   Playbox:
     type: application
@@ -17,6 +21,8 @@ targets:
         embed: true
       - framework: vendor/openssl.framework
         embed: true
+      - package: VLCKit
+        product: VLCKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.playboxapp.playbox

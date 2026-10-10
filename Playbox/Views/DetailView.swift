@@ -499,6 +499,12 @@ struct DetailView: View {
             torrentProgress = progress
             torrentPeerCount = peers
             torrentDiagnosticText = diagnostics
+
+            if action == .play,
+               case .ready(let url) = state,
+               playerURL == nil {
+                playerURL = PlayableURL(url: url)
+            }
         }
 
         guard torrentOperationID == operationID, !Task.isCancelled else { return }
@@ -506,7 +512,9 @@ struct DetailView: View {
         switch torrentState {
         case .ready(let url):
             if action == .play {
-                playerURL = PlayableURL(url: url)
+                if playerURL == nil {
+                    playerURL = PlayableURL(url: url)
+                }
             } else {
                 do {
                     let destination = try saveTorrentDownload(

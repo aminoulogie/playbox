@@ -89,7 +89,11 @@ struct JobState {
     std::string job_id;
     lt::torrent_handle handle;
     std::optional<FileSelection> pending_selection;
+    std::optional<int> primary_file_index;
+    std::string download_directory;
     bool completed_sent = false;
+    bool stream_ready_sent = false;
+    int streaming_deadline_through = -1;
     struct SwarmEvents {
         struct Tracker {
             std::string last_event;
@@ -118,6 +122,25 @@ struct DhtSessionEvents {
     std::optional<std::chrono::steady_clock::time_point> last_error_at;
     std::optional<int> last_error_code;
 };
+
+std::string file_path_to_url(const std::string &path) {
+    std::ostringstream output;
+    output << "file://";
+    static constexpr char hex[] = "0123456789ABCDEF";
+    for (const unsigned char ch : path) {
+        const bool safe =
+            (ch >= 'a' && ch <= 'z') ||
+            (ch >= 'A' && ch <= 'Z') ||
+            (ch >= '0' && ch <= '9') ||
+            ch == '/' || ch == '-' || ch == '_' || ch == '.' || ch == '~';
+        if (safe) {
+            output << ch;
+        } else {
+            output << '%' << hex[(ch >> 4) & 0x0f] << hex[ch & 0x0f];
+        }
+    }
+    return output.str();
+}
 
 std::string json_escape(const std::string &value) {
     std::ostringstream output;
@@ -778,16 +801,175 @@ bool apply_file_selection(lt::torrent_handle &handle, const FileSelection &selec
     return true;
 }
 
-bool apply_pending_selection(lt::torrent_handle &handle, JobState &state) {
-    if (!state.pending_selection.has_value()) {
-        return true;
+std::optional<std::pair<int, int>> file_piece_span(
+    const lt::torrent_handle &handle,
+    int file_index
+) {
+    const auto torrent_info = handle.torrent_file();
+    if (!torrent_info) {
+        return std::nullopt;
     }
 
-    if (!apply_file_selection(handle, *state.pending_selection)) {
+    const auto &files = torrent_info->files();
+    if (file_index < 0 || file_index >= files.num_files()) {
+        return std::nullopt;
+    }
+
+    const lt::file_index_t index{file_index};
+    const auto size = files.file_size(index);
+    if (size <= 0) {
+        return std::nullopt;
+    }
+
+    const auto offset = files.file_offset(index);
+    const auto piece_length = std::max(1, torrent_info->piece_length());
+    const int first = static_cast<int>(offset / piece_length);
+    const int last = static_cast<int>((offset + size - 1) / piece_length);
+    return std::make_pair(first, last);
+}
+
+std::int64_t contiguous_file_bytes(
+    const lt::torrent_handle &handle,
+    int file_index
+) {
+    const auto torrent_info = handle.torrent_file();
+    const auto span = file_piece_span(handle, file_index);
+    if (!torrent_info || !span.has_value()) {
+        return 0;
+    }
+
+    const auto &files = torrent_info->files();
+    const lt::file_index_t index{file_index};
+    const std::int64_t file_offset = files.file_offset(index);
+    const std::int64_t file_size = files.file_size(index);
+    const std::int64_t file_end = file_offset + file_size;
+
+    std::int64_t contiguous = 0;
+    for (int piece = span->first; piece <= span->second; ++piece) {
+        const lt::piece_index_t piece_index{piece};
+        if (!handle.have_piece(piece_index)) {
+            break;
+        }
+
+        const std::int64_t piece_start =
+            static_cast<std::int64_t>(piece) * torrent_info->piece_length();
+        const std::int64_t piece_end =
+            piece_start + torrent_info->piece_size(piece_index);
+        const std::int64_t overlap_start = std::max(file_offset, piece_start);
+        const std::int64_t overlap_end = std::min(file_end, piece_end);
+        if (overlap_end > overlap_start) {
+            contiguous += overlap_end - overlap_start;
+        }
+    }
+
+    return std::min(contiguous, file_size);
+}
+
+bool tail_ready_for_container(
+    const lt::torrent_handle &handle,
+    int file_index,
+    std::int64_t tail_bytes
+) {
+    const auto torrent_info = handle.torrent_file();
+    if (!torrent_info) {
         return false;
     }
 
-    state.pending_selection.reset();
+    const auto &files = torrent_info->files();
+    if (file_index < 0 || file_index >= files.num_files()) {
+        return false;
+    }
+
+    const lt::file_index_t index{file_index};
+    const auto size = files.file_size(index);
+    const auto offset = files.file_offset(index);
+    if (size <= 0) {
+        return false;
+    }
+
+    const auto piece_length = std::max(1, torrent_info->piece_length());
+    const auto start_offset = offset + std::max<std::int64_t>(0, size - tail_bytes);
+    const int first = static_cast<int>(start_offset / piece_length);
+    const int last = static_cast<int>((offset + size - 1) / piece_length);
+
+    for (int piece = first; piece <= last; ++piece) {
+        if (!handle.have_piece(lt::piece_index_t{piece})) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool file_needs_tail_metadata(const std::string &path) {
+    const auto dot = path.find_last_of('.');
+    if (dot == std::string::npos) {
+        return false;
+    }
+    std::string ext = path.substr(dot + 1);
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return ext == "mp4" || ext == "m4v" || ext == "mov";
+}
+
+void maintain_streaming_priorities(lt::torrent_handle &handle, JobState &state) {
+    if (!state.primary_file_index.has_value()) {
+        return;
+    }
+
+    const int file_index = *state.primary_file_index;
+    const auto torrent_info = handle.torrent_file();
+    const auto span = file_piece_span(handle, file_index);
+    if (!torrent_info || !span.has_value()) {
+        return;
+    }
+
+    const auto &files = torrent_info->files();
+    const lt::file_index_t index{file_index};
+    const std::string path = files.file_path(index);
+
+    int frontier = span->first;
+    while (frontier <= span->second && handle.have_piece(lt::piece_index_t{frontier})) {
+        ++frontier;
+    }
+
+    const int window_last = std::min(span->second, frontier + 96);
+    const int begin = std::max(frontier, state.streaming_deadline_through + 1);
+    for (int piece = begin; piece <= window_last; ++piece) {
+        const auto piece_index = lt::piece_index_t{piece};
+        handle.piece_priority(piece_index, lt::top_priority);
+        handle.set_piece_deadline(piece_index, (piece - frontier + 1) * 250);
+    }
+    state.streaming_deadline_through = std::max(state.streaming_deadline_through, window_last);
+
+    // Containers such as MP4/MOV may keep seek/index metadata at the end.
+    // Prioritize a small tail region in parallel with the forward window.
+    if (file_needs_tail_metadata(path)) {
+        const auto size = files.file_size(index);
+        const auto offset = files.file_offset(index);
+        const auto tail_start = offset + std::max<std::int64_t>(0, size - (2 * 1024 * 1024));
+        const auto piece_length = std::max(1, torrent_info->piece_length());
+        const int tail_first = static_cast<int>(tail_start / piece_length);
+        for (int piece = tail_first; piece <= span->second; ++piece) {
+            handle.piece_priority(lt::piece_index_t{piece}, lt::top_priority);
+        }
+    }
+}
+
+bool apply_pending_selection(lt::torrent_handle &handle, JobState &state) {
+    if (state.pending_selection.has_value()) {
+        if (!apply_file_selection(handle, *state.pending_selection)) {
+            return false;
+        }
+        if (state.pending_selection->primary_file_index.has_value()) {
+            state.primary_file_index = state.pending_selection->primary_file_index;
+        }
+        state.pending_selection.reset();
+        state.streaming_deadline_through = -1;
+        state.stream_ready_sent = false;
+    }
+
+    maintain_streaming_priorities(handle, state);
     return true;
 }
 
@@ -917,8 +1099,17 @@ public:
             }
 
             {
+                JobState state;
+                state.job_id = request.job_id;
+                state.handle = handle;
+                state.pending_selection = pending_selection;
+                state.download_directory = request.download_directory;
+                if (request.selection.has_value()) {
+                    state.primary_file_index = request.selection->primary_file_index;
+                }
+
                 std::lock_guard<std::mutex> guard(lock_);
-                jobs_[request.job_id] = JobState{request.job_id, handle, pending_selection, false};
+                jobs_[request.job_id] = std::move(state);
             }
             emit_progress(request.job_id, handle, false);
             return 0;
@@ -943,6 +1134,9 @@ public:
             return fail("selection request references an unknown jobId");
         }
         iterator->second.pending_selection = selection;
+        iterator->second.primary_file_index = selection->primary_file_index;
+        iterator->second.stream_ready_sent = false;
+        iterator->second.streaming_deadline_through = -1;
         apply_pending_selection(iterator->second.handle, iterator->second);
         return 0;
     }
@@ -1360,9 +1554,95 @@ private:
             }
 
             for (const auto &entry : snapshot) {
+                emit_stream_ready_if_possible(entry.first, entry.second);
                 emit_progress(entry.first, entry.second, false);
             }
         }
+    }
+
+    void emit_stream_ready_if_possible(
+        const std::string &job_id,
+        const lt::torrent_handle &handle
+    ) {
+        if (callback_ == nullptr || !handle.is_valid()) {
+            return;
+        }
+
+        std::optional<int> primary_index;
+        std::string download_directory;
+        bool already_sent = false;
+        {
+            std::lock_guard<std::mutex> guard(lock_);
+            const auto iterator = jobs_.find(job_id);
+            if (iterator == jobs_.end()) {
+                return;
+            }
+            primary_index = iterator->second.primary_file_index;
+            download_directory = iterator->second.download_directory;
+            already_sent = iterator->second.stream_ready_sent;
+        }
+
+        if (already_sent || !primary_index.has_value()) {
+            return;
+        }
+
+        const auto torrent_info = handle.torrent_file();
+        if (!torrent_info) {
+            return;
+        }
+
+        const auto &files = torrent_info->files();
+        const int file_index = *primary_index;
+        if (file_index < 0 || file_index >= files.num_files()) {
+            return;
+        }
+
+        const lt::file_index_t index{file_index};
+        const auto file_size = files.file_size(index);
+        const auto available = contiguous_file_bytes(handle, file_index);
+        const std::int64_t startup_target = std::min<std::int64_t>(
+            file_size,
+            12LL * 1024LL * 1024LL
+        );
+
+        const std::string relative_path = files.file_path(index);
+        const bool tail_required = file_needs_tail_metadata(relative_path);
+        const bool tail_ready = !tail_required || tail_ready_for_container(
+            handle,
+            file_index,
+            2LL * 1024LL * 1024LL
+        );
+
+        if (available < startup_target || !tail_ready) {
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> guard(lock_);
+            auto iterator = jobs_.find(job_id);
+            if (iterator == jobs_.end() || iterator->second.stream_ready_sent) {
+                return;
+            }
+            iterator->second.stream_ready_sent = true;
+        }
+
+        std::string absolute_path = download_directory;
+        if (!absolute_path.empty() && absolute_path.back() != '/') {
+            absolute_path.push_back('/');
+        }
+        absolute_path += relative_path;
+
+        std::ostringstream json;
+        json << "{\"type\":\"stream_ready\",\"readiness\":{";
+        json << "\"jobId\":\"" << json_escape(job_id) << "\",";
+        json << "\"primaryFileIndex\":" << file_index << ",";
+        json << "\"fileURL\":\"" << json_escape(file_path_to_url(absolute_path)) << "\",";
+        json << "\"bytesAvailable\":" << available << ",";
+        json << "\"totalBytes\":" << file_size;
+        json << "}}";
+
+        const auto payload = json.str();
+        callback_(payload.c_str(), context_);
     }
 
     void emit_progress(const std::string &job_id, const lt::torrent_handle &handle, bool force_completed) {
