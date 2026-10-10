@@ -7,6 +7,8 @@ struct TrackedPlayerView: View {
     @EnvironmentObject private var library: LibraryStore
     @State private var player = AVPlayer()
     @State private var observer: Any?
+    @State private var statusObserver: NSKeyValueObservation?
+    @State private var failureObserver: NSObjectProtocol?
     @State private var errorMessage: String?
     @State private var isLoading = true
 
@@ -29,49 +31,99 @@ struct TrackedPlayerView: View {
 
     @MainActor
     private func startPlayback() async {
+        cleanupCurrentItem()
         errorMessage = nil
         isLoading = true
-        if let observer { player.removeTimeObserver(observer); self.observer = nil }
-        player.replaceCurrentItem(with: nil)
-        let asset = AVURLAsset(url: url)
-        do {
-            let playable = try await asset.load(.isPlayable)
-            guard playable else { throw PlayerError.notPlayable }
-            let playerItem = AVPlayerItem(asset: asset)
-            player.replaceCurrentItem(with: playerItem)
-            let resume = library.position(for: item)
-            if resume > 0 {
-                await player.seek(to: CMTime(seconds: resume, preferredTimescale: 600))
-            }
-            observer = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 2, preferredTimescale: 600), queue: .main) { time in
-                Task { @MainActor in
-                    let duration = CMTimeGetSeconds(player.currentItem?.duration ?? .invalid)
-                    library.updatePlayback(item, position: CMTimeGetSeconds(time), duration: duration)
+
+        let asset = AVURLAsset(url: url, options: [
+            AVURLAssetAllowsCellularAccessKey: true,
+            AVURLAssetAllowsExpensiveNetworkAccessKey: true,
+            AVURLAssetAllowsConstrainedNetworkAccessKey: true
+        ])
+        let playerItem = AVPlayerItem(asset: asset)
+        playerItem.preferredForwardBufferDuration = 8
+
+        statusObserver = playerItem.observe(\.status, options: [.initial, .new]) { observed, _ in
+            Task { @MainActor in
+                guard player.currentItem === observed else { return }
+                switch observed.status {
+                case .readyToPlay:
+                    isLoading = false
+                    errorMessage = nil
+                    let resume = library.position(for: item)
+                    if resume > 0, player.currentTime().seconds < 1 {
+                        await player.seek(to: CMTime(seconds: resume, preferredTimescale: 600))
+                    }
+                    player.play()
+                case .failed:
+                    isLoading = false
+                    errorMessage = friendlyMessage(for: observed.error)
+                case .unknown:
+                    break
+                @unknown default:
+                    break
                 }
             }
-            player.play()
-            isLoading = false
-        } catch {
-            isLoading = false
-            let ns = error as NSError
-            if ns.domain == AVFoundationErrorDomain || error.localizedDescription.localizedCaseInsensitiveContains("operation stopped") {
-                errorMessage = "The server stopped this stream before iOS could open it. Try again or choose another direct source."
-            } else {
-                errorMessage = error.localizedDescription
+        }
+
+        failureObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: playerItem,
+            queue: .main
+        ) { note in
+            Task { @MainActor in
+                let error = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+                errorMessage = friendlyMessage(for: error)
+                isLoading = false
             }
+        }
+
+        player.replaceCurrentItem(with: playerItem)
+        observer = player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 2, preferredTimescale: 600),
+            queue: .main
+        ) { time in
+            Task { @MainActor in
+                let duration = CMTimeGetSeconds(player.currentItem?.duration ?? .invalid)
+                library.updatePlayback(item, position: CMTimeGetSeconds(time), duration: duration)
+            }
+        }
+        player.play()
+
+        try? await Task.sleep(for: .seconds(20))
+        if player.currentItem === playerItem, playerItem.status == .unknown {
+            isLoading = false
+            errorMessage = "The stream did not start within 20 seconds. The server may be unavailable or the media format may not be supported."
         }
     }
 
     @MainActor
-    private func stopPlayback() {
+    private func friendlyMessage(for error: Error?) -> String {
+        guard let error else {
+            return "iOS could not open this direct stream. The server, container, or codec may be incompatible."
+        }
+        let ns = error as NSError
+        let text = error.localizedDescription
+        if ns.domain == AVFoundationErrorDomain || text.localizedCaseInsensitiveContains("operation stopped") {
+            return "iOS could not decode or continue this stream. Try another direct source; its container or codec may be incompatible."
+        }
+        return text
+    }
+
+    @MainActor
+    private func cleanupCurrentItem() {
         player.pause()
         if let observer { player.removeTimeObserver(observer) }
         observer = nil
+        statusObserver?.invalidate()
+        statusObserver = nil
+        if let failureObserver { NotificationCenter.default.removeObserver(failureObserver) }
+        failureObserver = nil
         player.replaceCurrentItem(with: nil)
     }
-}
 
-private enum PlayerError: LocalizedError {
-    case notPlayable
-    var errorDescription: String? { "This direct stream is not playable by the iOS media engine." }
+    @MainActor
+    private func stopPlayback() {
+        cleanupCurrentItem()
+    }
 }
