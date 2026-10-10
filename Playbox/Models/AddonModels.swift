@@ -90,9 +90,10 @@ struct AddonStream: Codable, Identifiable, Hashable {
     let url: String?
     let infoHash: String?
     let fileIdx: Int?
+    let sources: [String]?
 
     var id: String {
-        [name, title, url, infoHash, fileIdx.map(String.init)]
+        [name, title, url, infoHash, fileIdx.map(String.init), sources?.joined(separator: ",")]
             .compactMap { $0 }.joined(separator: "|")
     }
 
@@ -107,12 +108,52 @@ struct AddonStream: Codable, Identifiable, Hashable {
 
     var playbackStatus: String {
         if playableURL != nil { return "Direct stream · Tap to play" }
-        if isTorrent { return "Torrent/magnet source · not directly playable" }
+        if isTorrent { return "Torrent source · Tap to download and play" }
         return "Unsupported stream URL"
     }
 
     var isTorrent: Bool {
         infoHash != nil || url?.lowercased().hasPrefix("magnet:") == true
+    }
+
+    var torrentMagnetURI: String? {
+        if let raw = url?.trimmingCharacters(in: .whitespacesAndNewlines),
+           raw.lowercased().hasPrefix("magnet:") {
+            return raw
+        }
+
+        guard let infoHash = infoHash?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !infoHash.isEmpty else { return nil }
+
+        var components = URLComponents()
+        components.scheme = "magnet"
+
+        var queryItems = [
+            URLQueryItem(name: "xt", value: "urn:btih:\(infoHash)")
+        ]
+
+        if let displayName = title ?? name, !displayName.isEmpty {
+            queryItems.append(URLQueryItem(name: "dn", value: displayName))
+        }
+
+        for tracker in torrentTrackers {
+            queryItems.append(URLQueryItem(name: "tr", value: tracker))
+        }
+
+        components.queryItems = queryItems
+        return components.string
+    }
+
+    private var torrentTrackers: [String] {
+        (sources ?? []).compactMap { source in
+            let value = source.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard value.lowercased().hasPrefix("tracker:") else { return nil }
+            let tracker = String(value.dropFirst("tracker:".count))
+            guard tracker.lowercased().hasPrefix("http://")
+                    || tracker.lowercased().hasPrefix("https://")
+                    || tracker.lowercased().hasPrefix("udp://") else { return nil }
+            return tracker
+        }
     }
 
     private var sourceText: String { [name, title].compactMap { $0 }.joined(separator: " ") }

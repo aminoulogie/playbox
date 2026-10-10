@@ -20,7 +20,7 @@ final class AddonStore: ObservableObject {
         .init(id: "cinemeta", name: "Cinemeta", summary: "Movie and series catalogs, metadata and ratings", category: "Catalogs", manifestURL: "https://v3-cinemeta.strem.io/manifest.json"),
         .init(id: "opensubtitles", name: "OpenSubtitles v3", summary: "Subtitles in multiple languages", category: "Subtitles", manifestURL: "https://opensubtitles-v3.strem.io/manifest.json"),
         .init(id: "watchhub", name: "WatchHub", summary: "Find official streaming availability", category: "Discovery", manifestURL: "https://watchhub.strem.io/manifest.json"),
-        .init(id: "torrentio", name: "Torrentio", summary: "Community source index. Torrent-only sources are not playable in Playbox.", category: "Community", manifestURL: "https://torrentio.strem.fun/manifest.json")
+        .init(id: "torrentio", name: "Torrentio", summary: "Community source index with direct and torrent sources.", category: "Community", manifestURL: "https://torrentio.strem.fun/manifest.json")
     ]
 
     @Published private(set) var addons: [InstalledAddon] = []
