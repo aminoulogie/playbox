@@ -6,10 +6,6 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-packages:
-  SwiftTorrent:
-    url: https://github.com/warppipe/swift-torrent.git
-    branch: main
 targets:
   Playbox:
     type: application
@@ -17,7 +13,10 @@ targets:
     sources:
       - path: Playbox
     dependencies:
-      - package: SwiftTorrent
+      - framework: vendor/LibtorrentNative.framework
+        embed: true
+      - framework: vendor/openssl.framework
+        embed: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.playboxapp.playbox
@@ -30,6 +29,7 @@ targets:
         CODE_SIGN_STYLE: Manual
         CODE_SIGNING_ALLOWED: NO
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks"
         SWIFT_EMIT_LOC_STRINGS: YES
         ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: NO
         SWIFT_COMPILATION_MODE: wholemodule
