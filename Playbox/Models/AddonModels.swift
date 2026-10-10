@@ -119,7 +119,7 @@ struct AddonStream: Codable, Identifiable, Hashable {
     var torrentMagnetURI: String? {
         if let raw = url?.trimmingCharacters(in: .whitespacesAndNewlines),
            raw.lowercased().hasPrefix("magnet:") {
-            return raw
+            return magnetURIByMergingTrackers(raw)
         }
 
         guard let infoHash = infoHash?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -144,16 +144,53 @@ struct AddonStream: Codable, Identifiable, Hashable {
         return components.string
     }
 
+    private func magnetURIByMergingTrackers(_ raw: String) -> String {
+        let sourceTrackers = torrentTrackers
+        guard !sourceTrackers.isEmpty,
+              var components = URLComponents(string: raw) else {
+            return raw
+        }
+
+        var queryItems = components.queryItems ?? []
+        var existingTrackers = Set(
+            queryItems
+                .filter { $0.name.lowercased() == "tr" }
+                .compactMap(\.value)
+                .map(normalizedTracker)
+        )
+
+        for tracker in sourceTrackers {
+            if existingTrackers.insert(normalizedTracker(tracker)).inserted {
+                queryItems.append(URLQueryItem(name: "tr", value: tracker))
+            }
+        }
+
+        components.queryItems = queryItems
+        return components.string ?? raw
+    }
+
     private var torrentTrackers: [String] {
-        (sources ?? []).compactMap { source in
+        var seen = Set<String>()
+
+        return (sources ?? []).compactMap { source in
             let value = source.trimmingCharacters(in: .whitespacesAndNewlines)
             guard value.lowercased().hasPrefix("tracker:") else { return nil }
+
             let tracker = String(value.dropFirst("tracker:".count))
-            guard tracker.lowercased().hasPrefix("http://")
-                    || tracker.lowercased().hasPrefix("https://")
-                    || tracker.lowercased().hasPrefix("udp://") else { return nil }
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let lowered = tracker.lowercased()
+
+            guard lowered.hasPrefix("http://")
+                    || lowered.hasPrefix("https://")
+                    || lowered.hasPrefix("udp://") else { return nil }
+            guard seen.insert(normalizedTracker(tracker)).inserted else { return nil }
+
             return tracker
         }
+    }
+
+    private func normalizedTracker(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     private var sourceText: String { [name, title].compactMap { $0 }.joined(separator: " ") }
