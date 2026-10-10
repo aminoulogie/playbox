@@ -1,5 +1,5 @@
 import SwiftUI
-import AVKit
+import VideoPlayer
 
 struct DetailView: View {
     @EnvironmentObject private var store: AddonStore
@@ -7,6 +7,7 @@ struct DetailView: View {
 
     @State private var streams: [AddonStream] = []
     @State private var playerURL: PlayableURL?
+    @State private var isPlaying = true
 
     var body: some View {
         List {
@@ -38,7 +39,7 @@ struct DetailView: View {
         .navigationTitle(item.name)
         .task { await loadStreams() }
         .sheet(item: $playerURL) { value in
-            VideoPlayer(player: AVPlayer(url: value.url))
+            VideoPlayer.VideoPlayer(url: value.url, play: $isPlaying)
                 .ignoresSafeArea()
         }
     }
