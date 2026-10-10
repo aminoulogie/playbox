@@ -104,4 +104,54 @@ struct AddonStream: Codable, Identifiable, Hashable {
     var isTorrent: Bool {
         infoHash != nil || url?.lowercased().hasPrefix("magnet:") == true
     }
+
+    private var sourceText: String { [name, title].compactMap { $0 }.joined(separator: " ") }
+
+    var quality: String {
+        let text = sourceText.lowercased()
+        if text.contains("2160p") || text.contains("4k") { return "4K" }
+        if text.contains("1080p") { return "1080p" }
+        if text.contains("720p") { return "720p" }
+        if text.contains("480p") { return "480p" }
+        return "Auto"
+    }
+
+    var codec: String? {
+        let text = sourceText.lowercased()
+        if text.contains("av1") { return "AV1" }
+        if text.contains("hevc") || text.contains("h265") || text.contains("x265") { return "HEVC" }
+        if text.contains("h264") || text.contains("x264") { return "H.264" }
+        return nil
+    }
+
+    var dynamicRange: String? {
+        let text = sourceText.lowercased()
+        if text.contains("dolby vision") || text.contains(" dv ") { return "Dolby Vision" }
+        if text.contains("hdr10+") { return "HDR10+" }
+        if text.contains("hdr") { return "HDR" }
+        return nil
+    }
+
+    var fileSize: String? {
+        let pattern = #"(?i)(\\d+(?:\\.\\d+)?)\\s*(GB|MB)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: sourceText, range: NSRange(sourceText.startIndex..., in: sourceText)),
+              let valueRange = Range(match.range(at: 1), in: sourceText),
+              let unitRange = Range(match.range(at: 2), in: sourceText) else { return nil }
+        return "\(sourceText[valueRange]) \(sourceText[unitRange].uppercased())"
+    }
+
+    var sourceSummary: String {
+        [quality, codec, dynamicRange, fileSize].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    var qualityRank: Int {
+        switch quality {
+        case "4K": return 4
+        case "1080p": return 3
+        case "720p": return 2
+        case "480p": return 1
+        default: return 0
+        }
+    }
 }
