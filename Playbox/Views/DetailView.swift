@@ -105,6 +105,8 @@ struct DetailView: View {
                         Text(stream.quality).font(.headline)
                         Text(stream.title ?? stream.name ?? "Source").font(.caption).lineLimit(2)
                         Text(stream.sourceSummary).font(.caption2).foregroundStyle(.secondary)
+                        Label(stream.playbackStatus, systemImage: stream.playableURL == nil ? "exclamationmark.circle" : "play.circle.fill")
+                            .font(.caption2).foregroundStyle(stream.playableURL == nil ? .secondary : .primary)
                     }
                 }.disabled(stream.playableURL == nil)
             }
