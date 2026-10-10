@@ -11,6 +11,7 @@ struct DetailView: View {
     @State private var selectedSubtitle: AddonSubtitle?
     @State private var playerURL: PlayableURL?
     @State private var selectedSeason = 1
+    @State private var showUnsupported = false
     private let cinemeta = URL(string: "https://v3-cinemeta.strem.io")!
 
     var body: some View {
@@ -94,21 +95,42 @@ struct DetailView: View {
         }
     }
 
+    private var playableStreams: [AddonStream] { streams.filter { $0.playableURL != nil } }
+    private var unsupportedStreams: [AddonStream] { streams.filter { $0.playableURL == nil } }
+
     private var sources: some View {
         Section("Play") {
-            if streams.isEmpty { Text("No playable sources returned.").foregroundStyle(.secondary) }
-            ForEach(streams) { stream in
+            if streams.isEmpty {
+                ContentUnavailableView("No sources", systemImage: "play.slash", description: Text("No installed add-on returned a source for this title."))
+            } else if playableStreams.isEmpty {
+                ContentUnavailableView("No direct stream available", systemImage: "play.slash", description: Text("\(unsupportedStreams.count) source(s) were found, but they are torrent/magnet or otherwise unsupported by the iOS player."))
+            }
+
+            ForEach(playableStreams) { stream in
                 Button {
                     if let url = stream.playableURL { playerURL = PlayableURL(url: url) }
                 } label: {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(stream.quality).font(.headline)
-                        Text(stream.title ?? stream.name ?? "Source").font(.caption).lineLimit(2)
-                        Text(stream.sourceSummary).font(.caption2).foregroundStyle(.secondary)
-                        Label(stream.playbackStatus, systemImage: stream.playableURL == nil ? "exclamationmark.circle" : "play.circle.fill")
-                            .font(.caption2).foregroundStyle(stream.playableURL == nil ? .secondary : .primary)
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(stream.quality).font(.headline)
+                            Text(stream.title ?? stream.name ?? "Direct stream").font(.caption).lineLimit(2)
+                            Text(stream.sourceSummary).font(.caption2).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "play.circle.fill").font(.title2)
                     }
-                }.disabled(stream.playableURL == nil)
+                }
+            }
+
+            if !unsupportedStreams.isEmpty {
+                DisclosureGroup("Unavailable sources (\(unsupportedStreams.count))", isExpanded: $showUnsupported) {
+                    ForEach(unsupportedStreams) { stream in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(stream.title ?? stream.name ?? "Source").font(.caption).lineLimit(2)
+                            Text(stream.playbackStatus).font(.caption2).foregroundStyle(.secondary)
+                        }.padding(.vertical, 3)
+                    }
+                }
             }
         }
     }
