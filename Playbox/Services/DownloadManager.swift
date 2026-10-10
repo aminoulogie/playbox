@@ -173,7 +173,7 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDownloadDeleg
             return urlExtension.lowercased()
         }
 
-        let suggestedExtension = (task.response?.suggestedFilename as NSString?)?.pathExtension ?? ""
+        let suggestedExtension = task.response?.suggestedFilename\n            .map { ($0 as NSString).pathExtension } ?? ""
         if Self.isValidFileExtension(suggestedExtension) {
             return suggestedExtension.lowercased()
         }
