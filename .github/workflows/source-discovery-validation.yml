@@ -1,0 +1,34 @@
+name: Source Discovery UI Validation
+
+on:
+  push:
+    branches:
+      - fix/source-discovery-ui
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore validated native frameworks
+        run: |
+          set -euo pipefail
+          mkdir -p vendor "$RUNNER_TEMP/ipa"
+          curl -fL --retry 3             "https://github.com/aminoulogie/playbox/releases/download/v1.0.69/Playbox-v1.0.69.ipa"             -o "$RUNNER_TEMP/Playbox.ipa"
+          unzip -q "$RUNNER_TEMP/Playbox.ipa"             "Payload/Playbox.app/Frameworks/LibtorrentNative.framework/*"             "Payload/Playbox.app/Frameworks/openssl.framework/*"             -d "$RUNNER_TEMP/ipa"
+          cp -R "$RUNNER_TEMP/ipa/Payload/Playbox.app/Frameworks/LibtorrentNative.framework" vendor/
+          cp -R "$RUNNER_TEMP/ipa/Payload/Playbox.app/Frameworks/openssl.framework" vendor/
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec project.yml
+
+      - name: Build Playbox for physical iPhone
+        run: |
+          set -o pipefail
+          xcodebuild             -project Playbox.xcodeproj             -scheme Playbox             -configuration Release             -sdk iphoneos             -destination 'generic/platform=iOS'             -derivedDataPath "$RUNNER_TEMP/DerivedData"             CODE_SIGNING_ALLOWED=NO             CODE_SIGNING_REQUIRED=NO             CODE_SIGN_IDENTITY=""             build
