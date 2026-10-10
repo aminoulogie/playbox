@@ -1,68 +1,125 @@
 import SwiftUI
 
+private struct CatalogSection: Identifiable {
+    let id: String
+    let title: String
+    let items: [MetaPreview]
+}
+
 struct CatalogView: View {
     @EnvironmentObject private var store: AddonStore
-    @State private var items: [MetaPreview] = []
+    @State private var sections: [CatalogSection] = []
     @State private var loading = false
     @State private var errorMessage: String?
 
+    // Cinemeta is Stremio's official public movie/series catalog provider.
+    // Stream-only add-ons remain independent of catalog discovery.
+    private let cinemeta = URL(string: "https://v3-cinemeta.strem.io")!
+
     var body: some View {
         Group {
-            if store.addons.isEmpty {
+            if sections.isEmpty && !loading {
                 ContentUnavailableView(
-                    "No Add-ons",
-                    systemImage: "puzzlepiece.extension",
-                    description: Text("Install a compatible add-on to load a catalog.")
+                    errorMessage == nil ? "No Titles Found" : "Couldn't Load Discover",
+                    systemImage: "film.stack",
+                    description: Text(errorMessage ?? "Pull down to refresh the catalogs.")
                 )
             } else {
-                List(items) { item in
-                    NavigationLink(value: item) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(item.name).font(.headline)
-                            Text(item.type.capitalized)
-                                .font(.caption).foregroundStyle(.secondary)
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 24) {
+                        ForEach(sections) { section in
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text(section.title)
+                                    .font(.title2.bold())
+                                    .padding(.horizontal)
+
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    LazyHStack(alignment: .top, spacing: 12) {
+                                        ForEach(section.items) { item in
+                                            NavigationLink(value: item) {
+                                                VStack(alignment: .leading, spacing: 6) {
+                                                    AsyncImage(url: item.poster.flatMap(URL.init(string:))) { image in
+                                                        image.resizable().scaledToFill()
+                                                    } placeholder: {
+                                                        Rectangle()
+                                                            .fill(.gray.opacity(0.2))
+                                                            .overlay {
+                                                                Image(systemName: "film")
+                                                                    .foregroundStyle(.secondary)
+                                                            }
+                                                    }
+                                                    .frame(width: 130, height: 190)
+                                                    .clipped()
+                                                    .clipShape(RoundedRectangle(cornerRadius: 9))
+                                                    Text(item.name)
+                                                        .font(.caption)
+                                                        .lineLimit(2)
+                                                        .frame(width: 130, alignment: .leading)
+                                                }
+                                                .foregroundStyle(.primary)
+                                            }
+                                        }
+                                    }
+                                    .padding(.horizontal)
+                                }
+                            }
                         }
                     }
+                    .padding(.vertical)
                 }
-                .navigationDestination(for: MetaPreview.self) {
-                    DetailView(item: $0)
-                }
-                .overlay {
-                    if loading { ProgressView() }
-                    else if let errorMessage {
-                        ContentUnavailableView(
-                            "Couldn’t Load Catalog",
-                            systemImage: "exclamationmark.triangle",
-                            description: Text(errorMessage)
-                        )
-                    }
-                }
+                .refreshable { await load() }
             }
         }
-        .navigationTitle("Playbox")
-        .task(id: store.addons.count) { await load() }
-        .refreshable { await load() }
+        .overlay { if loading && sections.isEmpty { ProgressView() } }
+        .navigationTitle("Discover")
+        .navigationDestination(for: MetaPreview.self) { DetailView(item: $0) }
+        .task { await load() }
     }
 
     private func load() async {
-        guard let addon = store.addons.first,
-              let catalog = addon.manifest.catalogs?.first else {
-            items = []
-            return
-        }
-
         loading = true
         defer { loading = false }
 
-        do {
-            items = try await AddonClient().catalog(
-                baseURL: addon.baseURL,
-                type: catalog.type,
-                id: catalog.id
-            )
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
+        // Use the official catalog even when installed add-ons only expose streams.
+        // Additional catalog add-ons can contribute their own sections.
+        var sources: [(String, URL, String, String)] = [
+            ("Popular Movies", cinemeta, "movie", "top"),
+            ("Popular Series", cinemeta, "series", "top"),
+            ("Featured Movies", cinemeta, "movie", "imdbRating"),
+            ("Featured Series", cinemeta, "series", "imdbRating")
+        ]
+        for addon in store.addons where addon.manifest.id != "com.linvo.cinemeta" {
+            for catalog in addon.manifest.catalogs ?? [] {
+                sources.append((
+                    catalog.name ?? addon.manifest.name,
+                    addon.baseURL,
+                    catalog.type,
+                    catalog.id
+                ))
+            }
         }
+
+        var results: [CatalogSection] = []
+        await withTaskGroup(of: (Int, [MetaPreview]?).self) { group in
+            for (index, source) in sources.enumerated() {
+                group.addTask {
+                    let items = try? await AddonClient().catalog(
+                        baseURL: source.1, type: source.2, id: source.3
+                    )
+                    return (index, items)
+                }
+            }
+            for await (index, items) in group {
+                if let items, !items.isEmpty {
+                    results.append(CatalogSection(
+                        id: String(index), title: sources[index].0, items: items
+                    ))
+                }
+            }
+        }
+        sections = results.sorted { (Int($0.id) ?? 0) < (Int($1.id) ?? 0) }
+        errorMessage = sections.isEmpty
+            ? "No catalog data was returned. Check your internet connection and try again."
+            : nil
     }
 }
