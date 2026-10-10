@@ -14,6 +14,16 @@ def replace_exact(path: Path, old: str, new: str, label: str) -> None:
     print(f"patched {label}: {path}")
 
 
+def insert_before(path: Path, anchor: str, insertion: str, label: str) -> None:
+    text = path.read_text()
+    count = text.count(anchor)
+    if count != 1:
+        raise SystemExit(f"{label}: expected exactly one anchor in {path}, found {count}")
+    path.chmod(path.stat().st_mode | stat.S_IWUSR)
+    path.write_text(text.replace(anchor, insertion + anchor, 1))
+    print(f"patched {label}: {path}")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit("usage: patch_swifttorrent.py <swift-torrent checkout>")
@@ -296,11 +306,9 @@ def main() -> None:
         "wire DHT traversal into active torrents",
     )
 
-    replace_exact(
+    insert_before(
         dht_node,
-        '''    /// Bootstrap by contacting well-known DHT nodes.
-    private func bootstrap() async {
-''',
+        "    private func bootstrap() async {\n",
         '''    /// Stop the DHT socket so sessions can be cancelled/restarted safely.
     public func stop() async throws {
         if let channel {
@@ -316,8 +324,6 @@ def main() -> None:
         }
     }
 
-    /// Bootstrap by contacting well-known nodes
-    private func bootstrap() async {
 ''',
         "add DHT socket shutdown",
     )
