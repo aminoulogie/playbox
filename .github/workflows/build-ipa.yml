@@ -42,6 +42,7 @@ jobs:
       - name: Patch SwiftTorrent peer discovery
         run: |
           set -euo pipefail
+          chmod -R u+w "$RUNNER_TEMP/DerivedData/SourcePackages/checkouts/swift-torrent"
           python3 scripts/patch_swifttorrent.py \
             "$RUNNER_TEMP/DerivedData/SourcePackages/checkouts/swift-torrent"
 
