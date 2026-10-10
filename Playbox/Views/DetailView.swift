@@ -26,6 +26,7 @@ struct DetailView: View {
     @State private var torrentTask: Task<Void, Never>?
     @State private var torrentErrors: [String: String] = [:]
     @State private var torrentDownloads: [String: URL] = [:]
+    @State private var sourceDiagnostics: [String] = []
     private let cinemeta = URL(string: "https://v3-cinemeta.strem.io")!
 
     var body: some View {
@@ -146,7 +147,12 @@ struct DetailView: View {
 
     private var playableStreams: [AddonStream] { streams.filter { $0.playableURL != nil } }
     private var torrentStreams: [AddonStream] { streams.filter { $0.isTorrent } }
-    private var unsupportedStreams: [AddonStream] { streams.filter { $0.playableURL == nil && !$0.isTorrent } }
+    private var externalStreams: [AddonStream] {
+        streams.filter { $0.playableURL == nil && !$0.isTorrent && $0.externalPageURL != nil }
+    }
+    private var unsupportedStreams: [AddonStream] {
+        streams.filter { $0.playableURL == nil && !$0.isTorrent && $0.externalPageURL == nil }
+    }
 
     private var sources: some View {
         Section(selectedEpisodeID == nil && item.type == "series" ? "Sources" : "Play") {
@@ -154,10 +160,29 @@ struct DetailView: View {
                 ContentUnavailableView("Choose an episode", systemImage: "rectangle.stack", description: Text("Select an episode above to find its available sources."))
             } else if isLoadingSources {
                 HStack { Spacer(); ProgressView("Finding sources…"); Spacer() }
-            } else if streams.isEmpty {
-                ContentUnavailableView("No sources", systemImage: "play.slash", description: Text("No installed add-on returned a source for this title."))
             } else if playableStreams.isEmpty && torrentStreams.isEmpty {
-                ContentUnavailableView("No playable source available", systemImage: "play.slash", description: Text("\(unsupportedStreams.count) source(s) were found, but they are not directly playable."))
+                VStack(spacing: 12) {
+                    ContentUnavailableView(
+                        "No playable source available",
+                        systemImage: "play.slash",
+                        description: Text(playableSourceEmptyDescription)
+                    )
+
+                    Button("Retry sources") {
+                        Task { await loadMedia(id: selectedEpisodeID ?? item.id) }
+                    }
+                    .buttonStyle(.bordered)
+
+                    if !sourceDiagnostics.isEmpty {
+                        DisclosureGroup("Source diagnostics") {
+                            ForEach(sourceDiagnostics, id: \.self) { line in
+                                Text(line)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
             }
 
             ForEach(playableStreams) { stream in
@@ -235,8 +260,32 @@ struct DetailView: View {
                 }
             }
 
+            if !(item.type == "series" && selectedEpisodeID == nil) && !externalStreams.isEmpty {
+                DisclosureGroup("Where to watch (\(externalStreams.count))") {
+                    ForEach(externalStreams) { stream in
+                        if let url = stream.externalPageURL {
+                            Link(destination: url) {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(stream.title ?? stream.name ?? "Provider")
+                                            .font(.caption)
+                                            .lineLimit(2)
+                                        Text("Opens provider website")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "arrow.up.right.square")
+                                }
+                                .padding(.vertical, 3)
+                            }
+                        }
+                    }
+                }
+            }
+
             if !(item.type == "series" && selectedEpisodeID == nil) && !unsupportedStreams.isEmpty {
-                DisclosureGroup("Unavailable sources (\(unsupportedStreams.count))", isExpanded: $showUnsupported) {
+                DisclosureGroup("Ignored sources (\(unsupportedStreams.count))", isExpanded: $showUnsupported) {
                     ForEach(unsupportedStreams) { stream in
                         VStack(alignment: .leading, spacing: 3) {
                             Text(stream.title ?? stream.name ?? "Source").font(.caption).lineLimit(2)
@@ -246,6 +295,16 @@ struct DetailView: View {
                 }
             }
         }
+    }
+
+    private var playableSourceEmptyDescription: String {
+        if externalStreams.isEmpty {
+            return sourceDiagnostics.isEmpty
+                ? "No installed add-on returned a direct or torrent source for this title."
+                : "No direct or torrent source was returned. Open Source diagnostics below to see which add-ons answered or failed."
+        }
+
+        return "Only external provider offers were returned. They are listed under Where to watch and are not media streams."
     }
 
     // MARK: - Downloads
@@ -425,25 +484,78 @@ struct DetailView: View {
         isLoadingSources = true
         streams = []
         subtitles = []
+        sourceDiagnostics = []
         defer { isLoadingSources = false }
+
         var foundStreams: [AddonStream] = []
         var foundSubtitles: [AddonSubtitle] = []
-        await withTaskGroup(of: ([AddonStream], [AddonSubtitle]).self) { group in
+        var diagnostics: [String] = []
+
+        await withTaskGroup(
+            of: (name: String, streams: [AddonStream], subtitles: [AddonSubtitle], streamError: String?).self
+        ) { group in
             for addon in store.addons {
                 group.addTask {
-                    async let s = try? AddonClient().streams(baseURL: addon.baseURL, type: item.type, id: id)
-                    async let c = try? AddonClient().subtitles(baseURL: addon.baseURL, type: item.type, id: id)
-                    return (await s ?? [], await c ?? [])
+                    let streamResult: Result<[AddonStream], Error>
+                    do {
+                        streamResult = .success(
+                            try await AddonClient().streams(
+                                baseURL: addon.baseURL,
+                                type: item.type,
+                                id: id
+                            )
+                        )
+                    } catch {
+                        streamResult = .failure(error)
+                    }
+
+                    let subtitles = (try? await AddonClient().subtitles(
+                        baseURL: addon.baseURL,
+                        type: item.type,
+                        id: id
+                    )) ?? []
+
+                    switch streamResult {
+                    case .success(let streams):
+                        return (addon.manifest.name, streams, subtitles, nil)
+                    case .failure(let error):
+                        return (addon.manifest.name, [], subtitles, error.localizedDescription)
+                    }
                 }
             }
+
             for await result in group {
-                foundStreams += result.0
-                foundSubtitles += result.1
+                foundStreams += result.streams
+                foundSubtitles += result.subtitles
+
+                if let error = result.streamError {
+                    diagnostics.append("\(result.name): failed — \(error)")
+                } else {
+                    let playableCount = result.streams.filter {
+                        $0.playableURL != nil || $0.isTorrent
+                    }.count
+                    let externalCount = result.streams.filter {
+                        $0.externalPageURL != nil
+                    }.count
+
+                    if playableCount > 0 {
+                        diagnostics.append("\(result.name): \(playableCount) playable/torrent source(s)")
+                    } else if externalCount > 0 {
+                        diagnostics.append("\(result.name): \(externalCount) external offer(s), 0 playable sources")
+                    } else {
+                        diagnostics.append("\(result.name): 0 sources")
+                    }
+                }
             }
         }
+
+        sourceDiagnostics = diagnostics.sorted()
         streams = Array(Set(foundStreams)).sorted {
             if ($0.playableURL != nil) != ($1.playableURL != nil) { return $0.playableURL != nil }
             if $0.isTorrent != $1.isTorrent { return !$0.isTorrent }
+            if ($0.externalPageURL != nil) != ($1.externalPageURL != nil) {
+                return $0.externalPageURL == nil
+            }
             return $0.qualityRank > $1.qualityRank
         }
         subtitles = Array(Set(foundSubtitles)).sorted { ($0.lang ?? "") < ($1.lang ?? "") }
