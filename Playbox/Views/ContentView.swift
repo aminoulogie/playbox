@@ -6,6 +6,9 @@ struct ContentView: View {
             NavigationStack { CatalogView() }
                 .tabItem { Label("Discover", systemImage: "play.rectangle") }
 
+            NavigationStack { LibraryView() }
+                .tabItem { Label("Library", systemImage: "books.vertical") }
+
             NavigationStack { AddonsView() }
                 .tabItem { Label("Add-ons", systemImage: "puzzlepiece.extension") }
         }
