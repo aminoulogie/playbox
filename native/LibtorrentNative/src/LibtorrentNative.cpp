@@ -772,6 +772,10 @@ bool apply_file_selection(lt::torrent_handle &handle, const FileSelection &selec
         *selection.primary_file_index >= 0 &&
         *selection.primary_file_index < file_count) {
         priorities[static_cast<std::size_t>(*selection.primary_file_index)] = lt::top_priority;
+
+        // Streaming clients need a contiguous prefix of the selected file so a
+        // media decoder can start while the rest of the torrent keeps arriving.
+        handle.set_flags(lt::torrent_flags::sequential_download);
     }
 
     handle.prioritize_files(priorities);
