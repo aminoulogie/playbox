@@ -39,7 +39,7 @@ struct DetailView: View {
         .navigationTitle(item.name)
         .task { await loadStreams() }
         .sheet(item: $playerURL) { value in
-            VideoPlayer.VideoPlayer(url: value.url, play: $isPlaying)
+            VideoPlayer(url: value.url, play: $isPlaying)
                 .ignoresSafeArea()
         }
     }
