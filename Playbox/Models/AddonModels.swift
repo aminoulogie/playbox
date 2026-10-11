@@ -281,12 +281,13 @@ struct AddonStream: Codable, Identifiable, Hashable {
                 let value = String(text[range])
                     .replacingOccurrences(of: " ", with: "")
                     .lowercased()
-                let suffix = value.last
                 let multiplier: Double
-                switch suffix {
-                case "k": multiplier = 1_000
-                case "m": multiplier = 1_000_000
-                default: multiplier = 1
+                if value.hasSuffix("k") {
+                    multiplier = 1_000
+                } else if value.hasSuffix("m") {
+                    multiplier = 1_000_000
+                } else {
+                    multiplier = 1
                 }
 
                 let digits = multiplier == 1 ? value : String(value.dropLast())
