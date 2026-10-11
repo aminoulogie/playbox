@@ -77,11 +77,11 @@ private struct DensityPreview: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let spacing = columns >= 7 ? 3.0 : 5.0
-            let totalSpacing = spacing * Double(max(0, columns - 1))
+            let spacing: CGFloat = columns >= 7 ? 3 : 5
+            let totalSpacing = spacing * CGFloat(max(0, columns - 1))
             let width = max(
-                4,
-                (Double(proxy.size.width) - totalSpacing) / Double(max(columns, 1))
+                CGFloat(4),
+                (proxy.size.width - totalSpacing) / CGFloat(max(columns, 1))
             )
 
             HStack(spacing: spacing) {
