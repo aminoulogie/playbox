@@ -82,6 +82,32 @@ import Foundation
             )
         }
 
+        public func updatePlaybackPosition(jobId: UUID, progress: Double) async throws {
+            guard let command = library.updatePlaybackPosition else {
+                throw LibtorrentRuntimeError.missingNativeSymbol("tryagi_libtorrent_job_update_playback_position")
+            }
+            guard progress.isFinite else {
+                throw LibtorrentRuntimeError.nativeCallFailed(
+                    operation: "update_playback_position",
+                    code: -1,
+                    message: "Playback progress must be finite."
+                )
+            }
+
+            let json = try Self.encode(NativeLibtorrentPlaybackPositionRequest(
+                jobId: jobId,
+                progress: min(1, max(0, progress))
+            ))
+            // A cancelled periodic update must not supersede a newer seek request.
+            try Task.checkCancellation()
+            let code = json.withCString { pointer in
+                command(handle, pointer)
+            }
+            guard code == 0 else {
+                throw nativeError(operation: "update_playback_position", code: code)
+            }
+        }
+
         public func reannounce(jobId: UUID) async throws {
             guard let command = library.reannounce else {
                 throw LibtorrentRuntimeError.missingNativeSymbol("tryagi_libtorrent_job_reannounce")
@@ -219,6 +245,7 @@ import Foundation
         let start: NativeJSONCommand
         let applySelection: NativeJSONCommand
         let updateRateLimits: NativeJSONCommand?
+        let updatePlaybackPosition: NativeJSONCommand?
         let reannounce: NativeJSONCommand?
         let refreshPeers: NativeJSONCommand?
         let pause: NativeJSONCommand
@@ -235,6 +262,7 @@ import Foundation
             start: @escaping NativeJSONCommand,
             applySelection: @escaping NativeJSONCommand,
             updateRateLimits: NativeJSONCommand? = nil,
+            updatePlaybackPosition: NativeJSONCommand? = nil,
             reannounce: NativeJSONCommand? = nil,
             refreshPeers: NativeJSONCommand? = nil,
             pause: @escaping NativeJSONCommand,
@@ -249,6 +277,7 @@ import Foundation
             self.start = start
             self.applySelection = applySelection
             self.updateRateLimits = updateRateLimits
+            self.updatePlaybackPosition = updatePlaybackPosition
             self.reannounce = reannounce
             self.refreshPeers = refreshPeers
             self.pause = pause
@@ -323,6 +352,11 @@ import Foundation
             )
             self.updateRateLimits = Self.loadOptionalSymbol(
                 "tryagi_libtorrent_job_update_rate_limits",
+                from: dynamicLibraryHandle,
+                as: NativeJSONCommand.self
+            )
+            self.updatePlaybackPosition = Self.loadOptionalSymbol(
+                "tryagi_libtorrent_job_update_playback_position",
                 from: dynamicLibraryHandle,
                 as: NativeJSONCommand.self
             )
@@ -415,6 +449,11 @@ import Foundation
     private struct NativeLibtorrentSelectionRequest: Encodable {
         let jobId: UUID
         let selection: LibtorrentFileSelection
+    }
+
+    private struct NativeLibtorrentPlaybackPositionRequest: Encodable {
+        let jobId: UUID
+        let progress: Double
     }
 
     private struct NativeLibtorrentRateLimitsRequest: Encodable {
