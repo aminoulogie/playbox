@@ -4,10 +4,23 @@ struct LibraryView: View {
     @EnvironmentObject private var library: LibraryStore
     @AppStorage("playbox.library.posterColumns") private var posterColumns = 4
 
+    private var density: Int {
+        min(max(posterColumns, 1), 12)
+    }
+
+    private var itemSpacing: CGFloat {
+        switch density {
+        case 1...2: 14
+        case 3...4: 10
+        case 5...6: 6
+        default: 4
+        }
+    }
+
     private var columns: [GridItem] {
         Array(
-            repeating: GridItem(.flexible(minimum: 0), spacing: posterColumns == 6 ? 6 : 10),
-            count: posterColumns
+            repeating: GridItem(.flexible(minimum: 0), spacing: itemSpacing),
+            count: density
         )
     }
 
@@ -17,7 +30,7 @@ struct LibraryView: View {
                 if !library.recent.isEmpty {
                     sectionHeader("Continue Watching")
 
-                    LazyVGrid(columns: columns, spacing: posterColumns == 6 ? 10 : 16) {
+                    LazyVGrid(columns: columns, spacing: itemSpacing + 4) {
                         ForEach(library.recent) { entry in
                             NavigationLink(value: entry.item) {
                                 posterCard(entry, showsProgress: true)
@@ -25,6 +38,7 @@ struct LibraryView: View {
                             .buttonStyle(.plain)
                         }
                     }
+                    .id("recent-\(density)")
                 }
 
                 sectionHeader("My Library")
@@ -38,7 +52,7 @@ struct LibraryView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 30)
                 } else {
-                    LazyVGrid(columns: columns, spacing: posterColumns == 6 ? 10 : 16) {
+                    LazyVGrid(columns: columns, spacing: itemSpacing + 4) {
                         ForEach(library.saved) { entry in
                             NavigationLink(value: entry.item) {
                                 posterCard(entry, showsProgress: false)
@@ -53,9 +67,10 @@ struct LibraryView: View {
                             }
                         }
                     }
+                    .id("saved-\(density)")
                 }
             }
-            .padding(.horizontal, posterColumns == 6 ? 8 : 12)
+            .padding(.horizontal, density >= 7 ? 6 : 12)
             .padding(.vertical, 12)
         }
         .navigationTitle("Library")
@@ -69,26 +84,28 @@ struct LibraryView: View {
     }
 
     private func posterCard(_ entry: LibraryStore.Entry, showsProgress: Bool) -> some View {
-        VStack(alignment: .leading, spacing: posterColumns == 6 ? 4 : 7) {
+        VStack(alignment: .leading, spacing: density >= 6 ? 3 : 7) {
             AsyncImage(url: entry.poster.flatMap(URL.init(string:))) { image in
                 image.resizable().scaledToFill()
             } placeholder: {
                 Rectangle().fill(.gray.opacity(0.2))
                     .overlay {
                         Image(systemName: "film")
+                            .font(density >= 7 ? .caption2 : .body)
                             .foregroundStyle(.secondary)
                     }
             }
             .aspectRatio(2.0 / 3.0, contentMode: .fit)
             .frame(maxWidth: .infinity)
             .clipped()
-            .clipShape(RoundedRectangle(cornerRadius: posterColumns == 6 ? 6 : 9))
+            .clipShape(RoundedRectangle(cornerRadius: density >= 7 ? 4 : 8))
 
-            Text(entry.name)
-                .font(posterColumns == 6 ? .caption2 : .caption)
-                .fontWeight(.semibold)
-                .lineLimit(1)
-                .foregroundStyle(.primary)
+            if density <= 8 {
+                Text(entry.name)
+                    .font(density >= 6 ? .system(size: 9.5, weight: .semibold) : .caption)
+                    .lineLimit(1)
+                    .foregroundStyle(.primary)
+            }
 
             if showsProgress {
                 ProgressView(value: entry.progress)

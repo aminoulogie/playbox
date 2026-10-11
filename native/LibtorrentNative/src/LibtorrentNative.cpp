@@ -900,6 +900,48 @@ bool tail_ready_for_container(
     return true;
 }
 
+double tail_download_progress(
+    const lt::torrent_handle &handle,
+    int file_index,
+    std::int64_t tail_bytes
+) {
+    const auto torrent_info = handle.torrent_file();
+    if (!torrent_info) {
+        return 0.0;
+    }
+
+    const auto &files = torrent_info->files();
+    if (file_index < 0 || file_index >= files.num_files()) {
+        return 0.0;
+    }
+
+    const lt::file_index_t index{file_index};
+    const auto size = files.file_size(index);
+    const auto offset = files.file_offset(index);
+    if (size <= 0) {
+        return 0.0;
+    }
+
+    const auto piece_length = std::max(1, torrent_info->piece_length());
+    const auto start_offset = offset + std::max<std::int64_t>(0, size - tail_bytes);
+    const int first = static_cast<int>(start_offset / piece_length);
+    const int last = static_cast<int>((offset + size - 1) / piece_length);
+    const int total = std::max(1, last - first + 1);
+
+    int complete = 0;
+    for (int piece = first; piece <= last; ++piece) {
+        if (handle.have_piece(lt::piece_index_t{piece})) {
+            ++complete;
+        }
+    }
+
+    return std::clamp(
+        static_cast<double>(complete) / static_cast<double>(total),
+        0.0,
+        1.0
+    );
+}
+
 bool file_needs_tail_metadata(const std::string &path) {
     const auto dot = path.find_last_of('.');
     if (dot == std::string::npos) {
@@ -947,11 +989,15 @@ void maintain_streaming_priorities(lt::torrent_handle &handle, JobState &state) 
     if (file_needs_tail_metadata(path)) {
         const auto size = files.file_size(index);
         const auto offset = files.file_offset(index);
-        const auto tail_start = offset + std::max<std::int64_t>(0, size - (2 * 1024 * 1024));
+        const auto tail_start = offset + std::max<std::int64_t>(0, size - (1 * 1024 * 1024));
         const auto piece_length = std::max(1, torrent_info->piece_length());
         const int tail_first = static_cast<int>(tail_start / piece_length);
         for (int piece = tail_first; piece <= span->second; ++piece) {
-            handle.piece_priority(lt::piece_index_t{piece}, lt::top_priority);
+            const auto piece_index = lt::piece_index_t{piece};
+            handle.piece_priority(piece_index, lt::top_priority);
+            if (!handle.have_piece(piece_index)) {
+                handle.set_piece_deadline(piece_index, 25 + (piece - tail_first) * 20);
+            }
         }
     }
 }
@@ -1541,7 +1587,7 @@ private:
 
     void pump_progress() {
         while (!stopping_.load()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
             process_alerts();
 
             std::vector<std::pair<std::string, lt::torrent_handle>> snapshot;
@@ -1602,7 +1648,7 @@ private:
         const auto available = contiguous_file_bytes(handle, file_index);
         const std::int64_t startup_target = std::min<std::int64_t>(
             file_size,
-            2LL * 1024LL * 1024LL
+            1LL * 1024LL * 1024LL
         );
 
         const std::string relative_path = files.file_path(index);
@@ -1610,7 +1656,7 @@ private:
         const bool tail_ready = !tail_required || tail_ready_for_container(
             handle,
             file_index,
-            2LL * 1024LL * 1024LL
+            1LL * 1024LL * 1024LL
         );
 
         if (available < startup_target || !tail_ready) {
@@ -1669,6 +1715,7 @@ private:
 
         std::int64_t streaming_buffered_bytes = 0;
         std::int64_t streaming_buffer_target_bytes = 0;
+        double streaming_ready_percent = 0.0;
         {
             std::lock_guard<std::mutex> guard(lock_);
             const auto iterator = jobs_.find(job_id);
@@ -1678,16 +1725,41 @@ private:
                 if (const auto info = handle.torrent_file()) {
                     const auto &files = info->files();
                     if (primary >= 0 && primary < files.num_files()) {
+                        const lt::file_index_t file_index{primary};
+                        const auto file_size = files.file_size(file_index);
                         streaming_buffer_target_bytes = std::min<std::int64_t>(
-                            files.file_size(lt::file_index_t{primary}),
-                            2LL * 1024LL * 1024LL
+                            file_size,
+                            1LL * 1024LL * 1024LL
                         );
+
+                        const double head_progress = streaming_buffer_target_bytes > 0
+                            ? std::clamp(
+                                static_cast<double>(streaming_buffered_bytes) /
+                                    static_cast<double>(streaming_buffer_target_bytes),
+                                0.0,
+                                1.0
+                            )
+                            : 0.0;
+
+                        const std::string path = files.file_path(file_index);
+                        if (file_needs_tail_metadata(path)) {
+                            const double tail_progress = tail_download_progress(
+                                handle,
+                                primary,
+                                1LL * 1024LL * 1024LL
+                            );
+                            streaming_ready_percent =
+                                (head_progress * 0.70 + tail_progress * 0.30) * 100.0;
+                        } else {
+                            streaming_ready_percent = head_progress * 100.0;
+                        }
                     }
                 }
             }
         }
         json << "\"streamingBufferedBytes\":" << streaming_buffered_bytes << ",";
         json << "\"streamingBufferTargetBytes\":" << streaming_buffer_target_bytes << ",";
+        json << "\"streamingReadyPercent\":" << streaming_ready_percent << ",";
         json << "\"peerCount\":" << status.num_peers << ",";
         json << "\"swarmDiagnostics\":";
         emit_swarm_diagnostics_json(json, job_id, handle, status);
