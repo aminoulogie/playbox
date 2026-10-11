@@ -1,3 +1,23 @@
+# Current source update — 2026-10-11
+
+The notes below describe earlier releases. Current baseline before this update was v1.0.76, which added reported seeder sorting.
+
+This update adds:
+- Poster sizing shared by Discover and Library: exact per-row counts, or a poster-width slider.
+- Quick play prefers an available HTTP(S) source entry, otherwise the highest ranked torrent. URLs are not probed in advance.
+- Native piece priorities follow the VLC playback/seek position, with decoder lookbehind and head/tail metadata retained. Playback-time fractions estimate file bytes; variable bitrate media needs physical-device testing.
+- Seeks wait for verified contiguous pieces around the estimated position, with cancellation and timeout handling.
+- Metadata timeout/reannounce uses elapsed time. Native progress snapshots are throttled to reduce UI work.
+- Player skip/speed controls, explicit buffering/errors/retry, and playback timing/rebuffer diagnostics.
+
+Unsigned physical-iPhone Release validation passed: https://github.com/aminoulogie/playbox/actions/runs/38178772947 (native compilation, exported playback command, Swift app build, embedded frameworks, and IPA packaging). This is a build check; on-device playback timing/seek checks still need to be performed.
+
+The 1 MiB startup threshold is retained pending actual iPhone timing and stall data. “Playback began” uses the first advancing player clock, not a direct rendered-frame callback.
+
+Required device checks for future sessions: test MP4/MKV startup, resume, forward/backward seeks, repeated seeks, replay after end, source errors, and closing/reopening; record playback details on the iPhone before tuning buffers.
+
+---
+
 # Playbox — Next Chat RAG / Handoff
 
 # START HERE — REQUIRED FOR THE NEXT AI CHAT
