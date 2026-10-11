@@ -4,20 +4,40 @@ struct SettingsView: View {
     @AppStorage("playbox.library.posterColumns") private var posterColumns = 4
     @AppStorage("playbox.player.verticalGestures") private var verticalGestures = true
 
+    private var clampedColumns: Int {
+        min(max(posterColumns, 1), 12)
+    }
+
     var body: some View {
         Form {
             Section("Library") {
-                Picker("Poster density", selection: $posterColumns) {
-                    Text("4 per row").tag(4)
-                    Text("6 per row").tag(6)
-                }
-                .pickerStyle(.segmented)
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Posters per row")
+                        Text("Type any value from 1 to 12.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
 
-                Text(posterColumns == 4
-                     ? "Larger posters with more spacing."
-                     : "Smaller posters so more of your library fits on screen.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    Spacer()
+
+                    TextField("4", value: $posterColumns, format: .number)
+                        .keyboardType(.numberPad)
+                        .multilineTextAlignment(.center)
+                        .monospacedDigit()
+                        .frame(width: 54)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                Stepper(
+                    "Density: \(clampedColumns) per row",
+                    value: $posterColumns,
+                    in: 1...12
+                )
+
+                DensityPreview(columns: clampedColumns)
+                    .frame(height: 76)
+                    .padding(.vertical, 4)
             }
 
             Section("Player") {
@@ -43,5 +63,36 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("Settings")
+        .onChange(of: posterColumns) { _, value in
+            let corrected = min(max(value, 1), 12)
+            if corrected != value {
+                posterColumns = corrected
+            }
+        }
+    }
+}
+
+private struct DensityPreview: View {
+    let columns: Int
+
+    var body: some View {
+        GeometryReader { proxy in
+            let spacing = columns >= 7 ? 3.0 : 5.0
+            let totalSpacing = spacing * Double(max(0, columns - 1))
+            let width = max(
+                4,
+                (Double(proxy.size.width) - totalSpacing) / Double(max(columns, 1))
+            )
+
+            HStack(spacing: spacing) {
+                ForEach(0..<columns, id: \.self) { _ in
+                    RoundedRectangle(cornerRadius: columns >= 7 ? 2 : 4)
+                        .fill(.secondary.opacity(0.24))
+                        .frame(width: width)
+                        .aspectRatio(2.0 / 3.0, contentMode: .fit)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
     }
 }
