@@ -275,6 +275,10 @@ public struct LibtorrentProgress: Sendable, Equatable, Codable {
     public let streamingBufferedBytes: Int64?
     public let streamingBufferTargetBytes: Int64?
     public let streamingReadyPercent: Double?
+    /// Requested normalized playback time; byte readiness uses an estimate within the selected file.
+    public let playbackPosition: Double?
+    public let playbackBufferedBytes: Int64?
+    public let playbackBufferTargetBytes: Int64?
     public let peerCount: Int?
     public let swarmDiagnostics: LibtorrentSwarmDiagnostics?
     public let files: [LibtorrentFileInfo]
@@ -293,6 +297,9 @@ public struct LibtorrentProgress: Sendable, Equatable, Codable {
         streamingBufferedBytes: Int64? = nil,
         streamingBufferTargetBytes: Int64? = nil,
         streamingReadyPercent: Double? = nil,
+        playbackPosition: Double? = nil,
+        playbackBufferedBytes: Int64? = nil,
+        playbackBufferTargetBytes: Int64? = nil,
         peerCount: Int? = nil,
         swarmDiagnostics: LibtorrentSwarmDiagnostics? = nil,
         files: [LibtorrentFileInfo] = []
@@ -310,6 +317,9 @@ public struct LibtorrentProgress: Sendable, Equatable, Codable {
         self.streamingBufferedBytes = streamingBufferedBytes
         self.streamingBufferTargetBytes = streamingBufferTargetBytes
         self.streamingReadyPercent = streamingReadyPercent
+        self.playbackPosition = playbackPosition
+        self.playbackBufferedBytes = playbackBufferedBytes
+        self.playbackBufferTargetBytes = playbackBufferTargetBytes
         self.peerCount = peerCount
         self.swarmDiagnostics = swarmDiagnostics
         self.files = files
@@ -353,11 +363,19 @@ public protocol LibtorrentSession: Sendable {
 
     func applySelection(jobId: UUID, selection: LibtorrentFileSelection) async throws
     func updateRateLimits(jobId: UUID, rateLimits: LibtorrentRateLimits) async throws
+    /// Follow playback only for Play jobs; Download jobs keep their existing selection priorities.
+    func updatePlaybackPosition(jobId: UUID, progress: Double) async throws
     func reannounce(jobId: UUID) async throws
     func refreshPeers(jobId: UUID) async throws
     func pause(jobId: UUID) async throws
     func resume(jobId: UUID) async throws
     func cancel(jobId: UUID) async throws
+}
+
+public extension LibtorrentSession {
+    func updatePlaybackPosition(jobId _: UUID, progress _: Double) async throws {
+        throw LibtorrentRuntimeError.missingNativeSymbol("tryagi_libtorrent_job_update_playback_position")
+    }
 }
 
 public enum LibtorrentSessionFactory {
@@ -387,6 +405,10 @@ public struct UnavailableLibtorrentSession: LibtorrentSession {
     }
 
     public func updateRateLimits(jobId _: UUID, rateLimits _: LibtorrentRateLimits) async throws {
+        throw LibtorrentRuntimeError.frameworkUnavailable
+    }
+
+    public func updatePlaybackPosition(jobId _: UUID, progress _: Double) async throws {
         throw LibtorrentRuntimeError.frameworkUnavailable
     }
 

@@ -2,6 +2,8 @@ import SwiftUI
 
 struct SettingsView: View {
     @AppStorage("playbox.library.posterColumns") private var posterColumns = 4
+    @AppStorage("playbox.library.posterSizingMode") private var posterSizingMode = "columns"
+    @AppStorage("playbox.library.posterWidth") private var posterWidth = 135.0
     @AppStorage("playbox.player.verticalGestures") private var verticalGestures = true
 
     private var clampedColumns: Int {
@@ -10,34 +12,49 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("Library") {
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Posters per row")
-                        Text("Type any value from 1 to 12.")
+            Section {
+                Picker("Poster sizing", selection: $posterSizingMode) {
+                    Text("Per row").tag("columns")
+                    Text("Poster size").tag("size")
+                }
+                .pickerStyle(.segmented)
+
+                if posterSizingMode == "size" {
+                    HStack {
+                        Label("Smaller", systemImage: "rectangle.grid.3x2")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                        Slider(value: $posterWidth, in: 60...220, step: 5)
+                            .accessibilityLabel("Poster size")
+                        Label("Larger", systemImage: "rectangle")
+                            .font(.caption)
                     }
 
-                    Spacer()
+                    Text("Fits as many posters as the screen allows.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Stepper(
+                        "Posters per row: \(clampedColumns)",
+                        value: $posterColumns,
+                        in: 1...12
+                    )
 
-                    TextField("4", value: $posterColumns, format: .number)
-                        .keyboardType(.numberPad)
-                        .multilineTextAlignment(.center)
-                        .monospacedDigit()
-                        .frame(width: 54)
-                        .textFieldStyle(.roundedBorder)
+                    Text("Show exactly \(clampedColumns) posters across the screen.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
-                Stepper(
-                    "Density: \(clampedColumns) per row",
-                    value: $posterColumns,
-                    in: 1...12
+                PosterPreview(
+                    columns: clampedColumns,
+                    sizingMode: posterSizingMode,
+                    preferredWidth: posterWidth
                 )
-
-                DensityPreview(columns: clampedColumns)
-                    .frame(height: 76)
-                    .padding(.vertical, 4)
+                .frame(height: 92)
+                .padding(.vertical, 4)
+            } header: {
+                Text("Posters")
+            } footer: {
+                Text("Applies immediately to Discover and Library.")
             }
 
             Section("Player") {
@@ -63,6 +80,13 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("Settings")
+        .onAppear {
+            posterColumns = clampedColumns
+            posterWidth = posterWidth.isFinite ? min(max(posterWidth, 60), 220) : 135
+            if posterSizingMode != "columns" && posterSizingMode != "size" {
+                posterSizingMode = "columns"
+            }
+        }
         .onChange(of: posterColumns) { _, value in
             let corrected = min(max(value, 1), 12)
             if corrected != value {
@@ -72,27 +96,34 @@ struct SettingsView: View {
     }
 }
 
-private struct DensityPreview: View {
+private struct PosterPreview: View {
     let columns: Int
+    let sizingMode: String
+    let preferredWidth: Double
 
     var body: some View {
         GeometryReader { proxy in
-            let spacing: CGFloat = columns >= 7 ? 3 : 5
-            let totalSpacing = spacing * CGFloat(max(0, columns - 1))
-            let width = max(
-                CGFloat(4),
-                (proxy.size.width - totalSpacing) / CGFloat(max(columns, 1))
+            let layout = PosterLayout(
+                availableWidth: proxy.size.width,
+                columns: columns,
+                sizingMode: sizingMode,
+                preferredWidth: preferredWidth
             )
-
-            HStack(spacing: spacing) {
-                ForEach(0..<columns, id: \.self) { _ in
-                    RoundedRectangle(cornerRadius: columns >= 7 ? 2 : 4)
+            let previewHeight = min(92, layout.height)
+            HStack(spacing: layout.spacing) {
+                ForEach(0..<layout.columns, id: \.self) { _ in
+                    RoundedRectangle(cornerRadius: layout.compact ? 4 : 8)
                         .fill(.secondary.opacity(0.24))
-                        .frame(width: width)
-                        .aspectRatio(2.0 / 3.0, contentMode: .fit)
+                        .overlay {
+                            Image(systemName: "film")
+                                .font(layout.compact ? .caption2 : .body)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(width: layout.width, height: previewHeight)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .center)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .accessibilityHidden(true)
     }
 }
