@@ -19,6 +19,26 @@ final class TorrentEngine: ObservableObject {
     @Published private(set) var bufferTargetBytes: Int64 = 0
     @Published private(set) var diagnosticText: String = "libtorrent starting…"
 
+    @Published private(set) var bufferedProgress: Double?
+    @Published private(set) var seekBufferProgress: Double = 0
+    @Published private(set) var isSeeking = false
+    @Published private(set) var seekError: String?
+    @Published private(set) var metadataSeconds: Double?
+    @Published private(set) var bufferReadySeconds: Double?
+    @Published private(set) var playbackBeganSeconds: Double?
+    @Published private(set) var rebufferCount = 0
+    @Published private(set) var rebufferSeconds: Double = 0
+
+    private var operationStartedAt: Date?
+    private var stallStartedAt: Date?
+    private var streamingURL: URL?
+    private var completedFile = false
+    private var selectedFileSize: Int64 = 0
+    private var nativePlaybackPosition: Double?
+    private var nativePlaybackBufferedBytes: Int64 = 0
+    private var nativePlaybackBufferTargetBytes: Int64 = 0
+    private var seekRequestID: UUID?
+    private var positionUpdateTask: Task<Void, Never>?
     private var session: (any LibtorrentSession)?
     private var currentJobID: UUID?
     private var selectedFileIndex: Int?
@@ -36,9 +56,11 @@ final class TorrentEngine: ObservableObject {
     func play(
         magnetLink raw: String,
         fileIndex: Int? = nil,
+        streaming: Bool = true,
         onUpdate: ((EngineState, Double, Int, Double, Double, String) -> Void)? = nil
     ) async {
         await stopCurrentJob()
+        resetPlaybackMeasurements()
 
         let magnet = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !magnet.isEmpty else {
@@ -101,31 +123,35 @@ final class TorrentEngine: ObservableObject {
             }
 
             try await withTaskCancellationHandler {
-                var metadataWaitTicks = 0
+                let metadataStartedAt = Date()
+                var lastDiscoveryRefreshAt = metadataStartedAt
 
                 for try await event in events {
                     try Task.checkCancellation()
+                    guard currentJobID == jobID else { return }
 
                     switch event {
                     case .progress(let snapshot):
                         let hasMetadata = !snapshot.files.isEmpty
 
                         if hasMetadata {
-                            metadataWaitTicks = 0
+                            if metadataSeconds == nil {
+                                metadataSeconds = Date().timeIntervalSince(metadataStartedAt)
+                            }
                             try await ensureValidFileSelection(
                                 snapshot: snapshot,
                                 session: nativeSession,
                                 jobID: jobID
                             )
                         } else {
-                            metadataWaitTicks += 1
-
-                            if metadataWaitTicks % 15 == 0 {
+                            let now = Date()
+                            if now.timeIntervalSince(lastDiscoveryRefreshAt) >= 15 {
+                                lastDiscoveryRefreshAt = now
                                 try? await nativeSession.reannounce(jobId: jobID)
                                 try? await nativeSession.refreshPeers(jobId: jobID)
                             }
 
-                            if metadataWaitTicks >= 120 {
+                            if now.timeIntervalSince(metadataStartedAt) >= 120 {
                                 throw EngineError.message(
                                     "libtorrent could not obtain torrent metadata after 120 seconds. " +
                                     diagnostics(for: snapshot)
@@ -159,6 +185,8 @@ final class TorrentEngine: ObservableObject {
                             )
                         }
 
+                        completedFile = true
+                        bufferedProgress = 1
                         let finalDiagnostics = diagnostics(for: snapshot)
                         try? await nativeSession.cancel(jobId: jobID)
                         clearJobReferences()
@@ -173,7 +201,12 @@ final class TorrentEngine: ObservableObject {
                         return
 
                     case .streamReady(let readiness):
+                        guard streaming else { continue }
                         selectedFileIndex = readiness.primaryFileIndex
+                        streamingURL = readiness.fileURL
+                        if bufferReadySeconds == nil, let started = operationStartedAt {
+                            bufferReadySeconds = Date().timeIntervalSince(started)
+                        }
                         update(
                             .ready(readiness.fileURL),
                             progress: progress,
@@ -196,6 +229,7 @@ final class TorrentEngine: ObservableObject {
             }
         } catch is CancellationError {
             try? await nativeSession.cancel(jobId: jobID)
+            guard currentJobID == jobID else { return }
             clearJobReferences()
             update(
                 .idle,
@@ -206,6 +240,7 @@ final class TorrentEngine: ObservableObject {
             )
         } catch {
             try? await nativeSession.cancel(jobId: jobID)
+            guard currentJobID == jobID else { return }
             let message = error.localizedDescription
             clearJobReferences()
             update(
@@ -235,6 +270,140 @@ final class TorrentEngine: ObservableObject {
             return url
         }
         return nil
+    }
+
+    /// Follow the playback clock without disturbing an in-flight seek.
+    func reportPlaybackPosition(seconds: Double, duration: Double) {
+        guard !isSeeking, seconds.isFinite, duration.isFinite, duration > 0,
+              let session, let jobID = currentJobID else { return }
+        let position = min(max(seconds / duration, 0), 0.999999)
+        positionUpdateTask?.cancel()
+        positionUpdateTask = Task {
+            guard !Task.isCancelled, currentJobID == jobID else { return }
+            do {
+                try await session.updatePlaybackPosition(jobId: jobID, progress: position)
+            } catch {
+                guard currentJobID == jobID, !Task.isCancelled else { return }
+                seekError = "Could not update the playback buffer: " + error.localizedDescription
+            }
+        }
+    }
+
+    /// VLC uses time fractions; the native bridge estimates the file byte range.
+    /// Wait for contiguous verified pieces around that range before applying a seek.
+    func prepareSeek(to progress: Double) async -> Bool {
+        guard progress.isFinite else { return false }
+        if completedFile { return true }
+        guard let session, let jobID = currentJobID else { return false }
+
+        let requested = min(max(progress, 0), 0.999999)
+        let requestID = UUID()
+        seekRequestID = requestID
+        isSeeking = true
+        seekError = nil
+        seekBufferProgress = 0
+        positionUpdateTask?.cancel()
+        defer {
+            if seekRequestID == requestID {
+                isSeeking = false
+                seekRequestID = nil
+            }
+        }
+
+        do {
+            try Task.checkCancellation()
+            try await session.updatePlaybackPosition(jobId: jobID, progress: requested)
+            let deadline = Date().addingTimeInterval(30)
+            while Date() < deadline {
+                try Task.checkCancellation()
+                guard currentJobID == jobID, seekRequestID == requestID else { return completedFile }
+                if let reported = nativePlaybackPosition,
+                   abs(reported - requested) < 0.000001,
+                   nativePlaybackBufferTargetBytes > 0 {
+                    seekBufferProgress = min(
+                        Double(nativePlaybackBufferedBytes) / Double(nativePlaybackBufferTargetBytes),
+                        1
+                    )
+                    if nativePlaybackBufferedBytes >= nativePlaybackBufferTargetBytes {
+                        return true
+                    }
+                }
+                try await Task.sleep(for: .milliseconds(150))
+            }
+            seekError = "The selected position is still buffering. Try again or choose another source."
+        } catch is CancellationError {
+            return false
+        } catch {
+            guard currentJobID == jobID, seekRequestID == requestID else { return false }
+            seekError = "Could not prepare this position: " + error.localizedDescription
+        }
+        return false
+    }
+
+    func recordPlaybackEvent(_ event: PlaybackMetricEvent) {
+        switch event {
+        case .firstFrame:
+            if playbackBeganSeconds == nil, let started = operationStartedAt {
+                playbackBeganSeconds = Date().timeIntervalSince(started)
+                UserDefaults.standard.set(playbackBeganSeconds, forKey: "playbox.playback.lastStartupSeconds")
+                UserDefaults.standard.set(metadataSeconds, forKey: "playbox.playback.lastMetadataSeconds")
+                UserDefaults.standard.set(bufferReadySeconds, forKey: "playbox.playback.lastBufferSeconds")
+            }
+        case .stalled:
+            if stallStartedAt == nil {
+                stallStartedAt = Date()
+                rebufferCount += 1
+            }
+        case .resumed, .ended:
+            finishStall()
+        case .failed(let message):
+            finishStall()
+            seekError = message
+        case .opening, .seekRequested, .seekReady:
+            break
+        }
+    }
+
+    var playbackDiagnostics: String {
+        var lines: [String] = []
+        if let value = metadataSeconds { lines.append(String(format: "Metadata ready: %.2f s", value)) }
+        if let value = bufferReadySeconds { lines.append(String(format: "Startup buffer ready: %.2f s", value)) }
+        if let value = playbackBeganSeconds { lines.append(String(format: "Playback began: %.2f s", value)) }
+        lines.append(String(format: "Rebuffering: %d times · %.2f s", rebufferCount, rebufferSeconds))
+        if isSeeking {
+            lines.append(String(format: "Preparing seek: %.0f%%", seekBufferProgress * 100))
+        }
+        if let seekError { lines.append(seekError) }
+        lines.append("Playback timing uses the first advancing player clock. Seek buffering estimates the byte position for variable bitrate files.")
+        lines.append(diagnosticText)
+        return lines.joined(separator: "\n")
+    }
+
+    private func finishStall() {
+        if let started = stallStartedAt {
+            rebufferSeconds += Date().timeIntervalSince(started)
+            stallStartedAt = nil
+        }
+    }
+
+    private func resetPlaybackMeasurements() {
+        operationStartedAt = Date()
+        streamingURL = nil
+        completedFile = false
+        selectedFileSize = 0
+        nativePlaybackPosition = nil
+        nativePlaybackBufferedBytes = 0
+        nativePlaybackBufferTargetBytes = 0
+        bufferedProgress = nil
+        isSeeking = false
+        seekBufferProgress = 0
+        seekError = nil
+        metadataSeconds = nil
+        bufferReadySeconds = nil
+        playbackBeganSeconds = nil
+        rebufferCount = 0
+        rebufferSeconds = 0
+        stallStartedAt = nil
     }
 
     private func ensureValidFileSelection(
@@ -295,6 +464,22 @@ final class TorrentEngine: ObservableObject {
             fileProgress = nil
         }
 
+        if let file = selectedVideoFile(in: snapshot.files) {
+            selectedFileSize = max(0, file.sizeBytes ?? 0)
+        }
+        nativePlaybackPosition = snapshot.playbackPosition
+        nativePlaybackBufferedBytes = max(0, snapshot.playbackBufferedBytes ?? 0)
+        nativePlaybackBufferTargetBytes = max(0, snapshot.playbackBufferTargetBytes ?? 0)
+        let contiguous = nativePlaybackPosition == nil
+            ? max(0, snapshot.streamingBufferedBytes ?? 0)
+            : nativePlaybackBufferedBytes
+        if selectedFileSize > 0 {
+            bufferedProgress = min(
+                max(0, nativePlaybackPosition ?? 0) + Double(contiguous) / Double(selectedFileSize),
+                1
+            )
+        }
+
         let normalizedProgress = max(0, min(fileProgress ?? 0, 1))
         let peers = snapshot.peerCount
             ?? snapshot.swarmDiagnostics?.connectedPeers
@@ -315,7 +500,7 @@ final class TorrentEngine: ObservableObject {
         cacheProgress = startupProgress
 
         update(
-            resolving ? .resolving : .downloading,
+            streamingURL.map(EngineState.ready) ?? (resolving ? .resolving : .downloading),
             progress: normalizedProgress,
             peers: peers,
             speed: speed,
@@ -349,6 +534,11 @@ final class TorrentEngine: ObservableObject {
     }
 
     private func stopCurrentJob() async {
+        positionUpdateTask?.cancel()
+        positionUpdateTask = nil
+        seekRequestID = nil
+        isSeeking = false
+        finishStall()
         if let session, let currentJobID {
             try? await session.cancel(jobId: currentJobID)
         }

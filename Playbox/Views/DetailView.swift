@@ -188,6 +188,37 @@ struct DetailView: View {
                 ContentUnavailableView("No playable source available", systemImage: "play.slash", description: Text("\(unsupportedStreams.count) source(s) were found, but they are not directly playable."))
             }
 
+            if !isLoadingSources,
+               !(item.type == "series" && selectedEpisodeID == nil),
+               let preferred = playableStreams.first ?? torrentStreams.first {
+                Button {
+                    if let url = preferred.playableURL {
+                        playerURL = PlayableURL(
+                            url: url,
+                            subtitles: subtitles,
+                            selectedSubtitle: selectedSubtitle
+                        )
+                    } else {
+                        startTorrent(preferred, action: .play)
+                    }
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "bolt.fill").font(.title2)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Quick play").font(.headline)
+                            Text(preferred.playableURL != nil
+                                 ? "Direct stream · \(preferred.quality)"
+                                 : "Torrent · \(preferred.seederCount.map { "\($0.formatted()) seeders" } ?? "Seeders unknown")")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "play.fill")
+                    }
+                }
+                .disabled(activeTorrentID != nil)
+                .accessibilityHint("Uses a direct stream when available, otherwise the highest ranked torrent.")
+            }
+
             ForEach(playableStreams) { stream in
                 HStack(spacing: 12) {
                     Button {
@@ -484,7 +515,8 @@ struct DetailView: View {
         streams = Array(Set(foundStreams)).sorted {
             if ($0.playableURL != nil) != ($1.playableURL != nil) { return $0.playableURL != nil }
             if $0.isTorrent != $1.isTorrent { return !$0.isTorrent }
-            return $0.qualityRank > $1.qualityRank
+            if $0.qualityRank != $1.qualityRank { return $0.qualityRank > $1.qualityRank }
+            return $0.id < $1.id
         }
         subtitles = Array(Set(foundSubtitles)).sorted { ($0.lang ?? "") < ($1.lang ?? "") }
     }
@@ -542,7 +574,8 @@ struct DetailView: View {
     ) async {
         await engine.play(
             magnetLink: magnetURL,
-            fileIndex: stream.fileIdx
+            fileIndex: stream.fileIdx,
+            streaming: action == .play
         ) { state, progress, peers, speed, cacheProgress, diagnostics in
             guard torrentOperationID == operationID else { return }
             torrentState = state

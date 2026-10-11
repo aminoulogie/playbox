@@ -18,7 +18,18 @@ struct TorrentPlaybackView: View {
                     url: streamURL,
                     item: item,
                     subtitles: subtitles,
-                    selectedSubtitle: selectedSubtitle
+                    selectedSubtitle: selectedSubtitle,
+                    bufferedProgress: engine.bufferedProgress,
+                    playbackDiagnostics: engine.playbackDiagnostics,
+                    onPlaybackPosition: { seconds, duration in
+                        engine.reportPlaybackPosition(seconds: seconds, duration: duration)
+                    },
+                    prepareSeek: { position in
+                        await engine.prepareSeek(to: position)
+                    },
+                    onPlaybackEvent: { event in
+                        engine.recordPlaybackEvent(event)
+                    }
                 )
                 .ignoresSafeArea()
             } else {
