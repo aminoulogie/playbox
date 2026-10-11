@@ -2,43 +2,99 @@ import SwiftUI
 
 struct LibraryView: View {
     @EnvironmentObject private var library: LibraryStore
+    @AppStorage("playbox.library.posterColumns") private var posterColumns = 4
+
+    private var columns: [GridItem] {
+        Array(
+            repeating: GridItem(.flexible(minimum: 0), spacing: posterColumns == 6 ? 6 : 10),
+            count: posterColumns
+        )
+    }
 
     var body: some View {
-        List {
-            if !library.recent.isEmpty {
-                Section("Continue Watching") {
-                    ForEach(library.recent) { entry in
-                        NavigationLink(value: entry.item) {
-                            HStack(spacing: 12) {
-                                poster(entry.poster)
-                                VStack(alignment: .leading, spacing: 7) {
-                                    Text(entry.name).font(.headline)
-                                    Text(entry.type.capitalized).font(.caption).foregroundStyle(.secondary)
-                                    ProgressView(value: entry.progress)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 24) {
+                if !library.recent.isEmpty {
+                    sectionHeader("Continue Watching")
+
+                    LazyVGrid(columns: columns, spacing: posterColumns == 6 ? 10 : 16) {
+                        ForEach(library.recent) { entry in
+                            NavigationLink(value: entry.item) {
+                                posterCard(entry, showsProgress: true)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                sectionHeader("My Library")
+
+                if library.saved.isEmpty {
+                    ContentUnavailableView(
+                        "Your library is empty",
+                        systemImage: "books.vertical",
+                        description: Text("Save a movie or series from its details page.")
+                    )
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 30)
+                } else {
+                    LazyVGrid(columns: columns, spacing: posterColumns == 6 ? 10 : 16) {
+                        ForEach(library.saved) { entry in
+                            NavigationLink(value: entry.item) {
+                                posterCard(entry, showsProgress: false)
+                            }
+                            .buttonStyle(.plain)
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    library.removeSaved(id: entry.id)
+                                } label: {
+                                    Label("Remove from Library", systemImage: "trash")
                                 }
                             }
                         }
                     }
                 }
             }
-            Section("My Library") {
-                if library.saved.isEmpty {
-                    Text("Save a movie or series from its details page.").foregroundStyle(.secondary)
-                }
-                ForEach(library.saved) { entry in
-                    NavigationLink(value: entry.item) {
-                        HStack(spacing: 12) { poster(entry.poster); Text(entry.name).font(.headline) }
-                    }
-                }.onDelete(perform: library.removeSaved)
-            }
+            .padding(.horizontal, posterColumns == 6 ? 8 : 12)
+            .padding(.vertical, 12)
         }
         .navigationTitle("Library")
         .navigationDestination(for: MetaPreview.self) { DetailView(item: $0) }
     }
 
-    private func poster(_ value: String?) -> some View {
-        AsyncImage(url: value.flatMap(URL.init(string:))) { image in image.resizable().scaledToFill() }
-        placeholder: { Rectangle().fill(.gray.opacity(0.2)) }
-            .frame(width: 52, height: 76).clipped().clipShape(RoundedRectangle(cornerRadius: 7))
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.title3.bold())
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func posterCard(_ entry: LibraryStore.Entry, showsProgress: Bool) -> some View {
+        VStack(alignment: .leading, spacing: posterColumns == 6 ? 4 : 7) {
+            AsyncImage(url: entry.poster.flatMap(URL.init(string:))) { image in
+                image.resizable().scaledToFill()
+            } placeholder: {
+                Rectangle().fill(.gray.opacity(0.2))
+                    .overlay {
+                        Image(systemName: "film")
+                            .foregroundStyle(.secondary)
+                    }
+            }
+            .aspectRatio(2.0 / 3.0, contentMode: .fit)
+            .frame(maxWidth: .infinity)
+            .clipped()
+            .clipShape(RoundedRectangle(cornerRadius: posterColumns == 6 ? 6 : 9))
+
+            Text(entry.name)
+                .font(posterColumns == 6 ? .caption2 : .caption)
+                .fontWeight(.semibold)
+                .lineLimit(1)
+                .foregroundStyle(.primary)
+
+            if showsProgress {
+                ProgressView(value: entry.progress)
+                    .controlSize(.mini)
+            }
+        }
+        .contentShape(Rectangle())
     }
 }
