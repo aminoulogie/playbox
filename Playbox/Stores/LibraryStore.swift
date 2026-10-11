@@ -61,6 +61,11 @@ final class LibraryStore: ObservableObject {
 
     func removeSaved(at offsets: IndexSet) { saved.remove(atOffsets: offsets); persist() }
 
+    func removeSaved(id: String) {
+        saved.removeAll { $0.id == id }
+        persist()
+    }
+
     private func entry(_ item: MetaPreview, progress: Double) -> Entry {
         Entry(id: item.id, type: item.type, name: item.name, poster: item.poster,
               progress: progress, updatedAt: Date(), position: nil, duration: nil)

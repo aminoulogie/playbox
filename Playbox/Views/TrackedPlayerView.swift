@@ -4,7 +4,13 @@ import AVKit
 struct TrackedPlayerView: View {
     let url: URL
     let item: MetaPreview
+    let subtitles: [AddonSubtitle]
+    let selectedSubtitle: AddonSubtitle?
+
     @EnvironmentObject private var library: LibraryStore
+    @AppStorage("playbox.player.verticalGestures") private var verticalGesturesEnabled = true
+    @StateObject private var subtitleController = SubtitleOverlayController()
+    @StateObject private var gestureController = PlaybackGestureController()
     @State private var player = AVPlayer()
     @State private var observer: Any?
     @State private var statusObserver: NSKeyValueObservation?
@@ -13,6 +19,7 @@ struct TrackedPlayerView: View {
     @State private var isLoading = true
     @State private var currentProgress: Double = 0
     @State private var currentSpeed: Double = 0
+    @State private var playbackSeconds: Double = 0
     @State private var lastLoaded: Int64 = 0
     @State private var lastSpeedUpdate: Date = Date()
     @State private var progressTask: Task<Void, Never>?
@@ -20,10 +27,74 @@ struct TrackedPlayerView: View {
     @ViewBuilder
     var body: some View {
         if url.isFileURL {
-            VLCLocalTrackedPlayerView(url: url, item: item)
+            VLCLocalTrackedPlayerView(
+                url: url,
+                item: item,
+                subtitles: subtitles,
+                selectedSubtitle: selectedSubtitle
+            )
         } else {
-            ZStack {
-            VideoPlayer(player: player).ignoresSafeArea()
+            directPlayer
+                .task {
+                    subtitleController.select(selectedSubtitle)
+                    await startPlayback()
+                }
+                .onDisappear { stopPlayback() }
+        }
+    }
+
+    private var directPlayer: some View {
+        ZStack {
+            GeometryReader { proxy in
+                VideoPlayer(player: player)
+                    .ignoresSafeArea()
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 8)
+                            .onChanged { value in
+                                guard verticalGesturesEnabled else { return }
+                                gestureController.update(
+                                    startX: value.startLocation.x,
+                                    translation: value.translation,
+                                    width: proxy.size.width
+                                )
+                            }
+                            .onEnded { _ in
+                                guard verticalGesturesEnabled else { return }
+                                gestureController.end()
+                            }
+                    )
+            }
+
+            SystemVolumeHost(controller: gestureController)
+                .frame(width: 1, height: 1)
+                .opacity(0.001)
+                .allowsHitTesting(false)
+
+            VStack {
+                HStack {
+                    Spacer()
+                    ccMenu
+                        .padding(.trailing, 18)
+                        .padding(.top, 12)
+                }
+
+                Spacer()
+
+                if let subtitleText = subtitleController.text(at: playbackSeconds) {
+                    Text(subtitleText)
+                        .font(.system(size: 20, weight: .semibold))
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.white)
+                        .shadow(color: .black, radius: 3)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 8)
+                        .background(.black.opacity(0.42), in: RoundedRectangle(cornerRadius: 8))
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 54)
+                }
+            }
+
+            PlaybackGestureHUD(controller: gestureController)
 
             if isLoading && errorMessage == nil {
                 VStack(spacing: 18) {
@@ -71,16 +142,55 @@ struct TrackedPlayerView: View {
 
             if let errorMessage {
                 VStack(spacing: 14) {
-                    ContentUnavailableView("Playback failed", systemImage: "exclamationmark.triangle", description: Text(errorMessage))
+                    ContentUnavailableView(
+                        "Playback failed",
+                        systemImage: "exclamationmark.triangle",
+                        description: Text(errorMessage)
+                    )
                     Button("Try Again") { Task { await startPlayback() } }
                         .buttonStyle(.borderedProminent)
                 }
-                .padding().background(.ultraThinMaterial)
+                .padding()
+                .background(.ultraThinMaterial)
             }
         }
-            .task { await startPlayback() }
-            .onDisappear { stopPlayback() }
+    }
+
+    @ViewBuilder
+    private var ccMenu: some View {
+        Menu {
+            Button {
+                subtitleController.select(nil)
+            } label: {
+                if subtitleController.selectedID == nil {
+                    Label("Off", systemImage: "checkmark")
+                } else {
+                    Text("Off")
+                }
+            }
+
+            ForEach(subtitles, id: \.stableID) { subtitle in
+                Button {
+                    subtitleController.select(subtitle)
+                } label: {
+                    let title = subtitle.lang?.uppercased() ?? "CC"
+                    if subtitleController.selectedID == subtitle.stableID {
+                        Label(title, systemImage: "checkmark")
+                    } else {
+                        Text(title)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "captions.bubble.fill")
+                .font(.title3)
+                .foregroundStyle(.white)
+                .padding(10)
+                .background(.black.opacity(0.58), in: Circle())
         }
+        .disabled(subtitles.isEmpty)
+        .opacity(subtitles.isEmpty ? 0.45 : 1)
+        .accessibilityLabel("Subtitles")
     }
 
     @MainActor
@@ -90,6 +200,7 @@ struct TrackedPlayerView: View {
         isLoading = true
         currentProgress = 0
         currentSpeed = 0
+        playbackSeconds = 0
         lastLoaded = 0
         lastSpeedUpdate = Date()
 
@@ -168,8 +279,11 @@ struct TrackedPlayerView: View {
 
                 let duration = playerItem.duration
                 let progress = duration.value > 0 ? Double(loaded) / Double(duration.value) : 0
+                let seconds = player.currentTime().seconds
 
                 await MainActor.run {
+                    playbackSeconds = seconds.isFinite ? max(0, seconds) : 0
+
                     let now = Date()
                     let delta = now.timeIntervalSince(lastSpeedUpdate)
                     if delta >= 0.1 {

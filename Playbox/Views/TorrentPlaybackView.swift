@@ -3,6 +3,8 @@ import SwiftUI
 struct TorrentPlaybackView: View {
     @ObservedObject var engine: TorrentEngine
     let item: MetaPreview
+    let subtitles: [AddonSubtitle]
+    let selectedSubtitle: AddonSubtitle?
 
     @Environment(\.dismiss) private var dismiss
     @State private var streamURL: URL?
@@ -12,8 +14,13 @@ struct TorrentPlaybackView: View {
             Color.black.ignoresSafeArea()
 
             if let streamURL {
-                TrackedPlayerView(url: streamURL, item: item)
-                    .ignoresSafeArea()
+                TrackedPlayerView(
+                    url: streamURL,
+                    item: item,
+                    subtitles: subtitles,
+                    selectedSubtitle: selectedSubtitle
+                )
+                .ignoresSafeArea()
             } else {
                 VStack(spacing: 18) {
                     ZStack {
