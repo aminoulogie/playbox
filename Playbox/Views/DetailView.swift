@@ -165,7 +165,15 @@ struct DetailView: View {
     }
 
     private var playableStreams: [AddonStream] { streams.filter { $0.playableURL != nil } }
-    private var torrentStreams: [AddonStream] { streams.filter { $0.isTorrent } }
+    private var torrentStreams: [AddonStream] {
+        streams.filter { $0.isTorrent }.sorted {
+            let left = $0.seederCount ?? -1
+            let right = $1.seederCount ?? -1
+            if left != right { return left > right }
+            if $0.qualityRank != $1.qualityRank { return $0.qualityRank > $1.qualityRank }
+            return $0.id < $1.id
+        }
+    }
     private var unsupportedStreams: [AddonStream] { streams.filter { $0.playableURL == nil && !$0.isTorrent } }
 
     private var sources: some View {
@@ -215,6 +223,11 @@ struct DetailView: View {
                         Text(stream.quality).font(.headline)
                         Text(stream.title ?? stream.name ?? "Torrent source").font(.caption).lineLimit(2)
                         Text(stream.sourceSummary).font(.caption2).foregroundStyle(.secondary)
+                        if let seeders = stream.seederCount {
+                            Label("\(seeders.formatted()) seeders", systemImage: "person.2.fill")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                         torrentStatus(for: stream)
                     }
 
