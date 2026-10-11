@@ -8,6 +8,9 @@ private struct CatalogSection: Identifiable {
 
 struct CatalogView: View {
     @EnvironmentObject private var store: AddonStore
+    @AppStorage("playbox.library.posterColumns") private var posterColumns = 4
+    @AppStorage("playbox.library.posterSizingMode") private var posterSizingMode = "columns"
+    @AppStorage("playbox.library.posterWidth") private var posterWidth = 135.0
     @State private var sections: [CatalogSection] = []
     @State private var loading = false
     @State private var errorMessage: String?
@@ -16,6 +19,27 @@ struct CatalogView: View {
     private let cinemeta = URL(string: "https://v3-cinemeta.strem.io")!
 
     var body: some View {
+        GeometryReader { proxy in
+            let layout = PosterLayout(
+                availableWidth: proxy.size.width,
+                columns: posterColumns,
+                sizingMode: posterSizingMode,
+                preferredWidth: posterWidth
+            )
+            catalogContent(layout: layout)
+        }
+        .overlay { if loading && sections.isEmpty { ProgressView() } }
+        .navigationTitle("Playbox")
+        .searchable(text: $searchText, prompt: "Movies and series")
+        .onSubmit(of: .search) { Task { await search() } }
+        .onChange(of: searchText) { _, value in
+            if value.isEmpty { Task { await load() } }
+        }
+        .navigationDestination(for: MetaPreview.self) { DetailView(item: $0) }
+        .task { await load() }
+    }
+
+    private func catalogContent(layout: PosterLayout) -> some View {
         Group {
             if sections.isEmpty && !loading {
                 ContentUnavailableView(
@@ -52,16 +76,16 @@ struct CatalogView: View {
                                     }.padding(20)
                                 }
                                 .clipShape(RoundedRectangle(cornerRadius: 18))
-                                .padding(.horizontal)
+                                .padding(.horizontal, layout.horizontalPadding)
                             }
                             .buttonStyle(.plain)
                         }
 
                         ForEach(sections) { section in
                             VStack(alignment: .leading, spacing: 12) {
-                                Text(section.title).font(.title2.bold()).padding(.horizontal)
+                                Text(section.title).font(.title2.bold()).padding(.horizontal, layout.horizontalPadding)
                                 ScrollView(.horizontal, showsIndicators: false) {
-                                    LazyHStack(alignment: .top, spacing: 12) {
+                                    LazyHStack(alignment: .top, spacing: layout.spacing) {
                                         ForEach(section.items) { item in
                                             NavigationLink(value: item) {
                                                 VStack(alignment: .leading, spacing: 6) {
@@ -72,22 +96,31 @@ struct CatalogView: View {
                                                             Rectangle().fill(.gray.opacity(0.2))
                                                                 .overlay { Image(systemName: "film").foregroundStyle(.secondary) }
                                                         }
-                                                        .frame(width: 135, height: 200).clipped()
-                                                        .clipShape(RoundedRectangle(cornerRadius: 11))
-                                                        if let rating = item.imdbRating {
+                                                        .frame(width: layout.width, height: layout.height).clipped()
+                                                        .clipShape(RoundedRectangle(cornerRadius: layout.compact ? 4 : 11))
+                                                        if !layout.compact, let rating = item.imdbRating {
                                                             Text("★ \(rating)")
                                                                 .font(.caption2.bold()).padding(5)
                                                                 .background(.black.opacity(0.75), in: Capsule())
                                                                 .foregroundStyle(.white).padding(6)
                                                         }
                                                     }
-                                                    Text(item.name).font(.caption.weight(.semibold)).lineLimit(1)
-                                                    Text(item.type.capitalized).font(.caption2).foregroundStyle(.secondary)
+                                                    if layout.showsTitle {
+                                                        Text(item.name)
+                                                            .font(layout.compact ? .system(size: 9.5, weight: .semibold) : .caption.weight(.semibold))
+                                                            .lineLimit(1)
+                                                    }
+                                                    if !layout.compact {
+                                                        Text(item.type.capitalized).font(.caption2).foregroundStyle(.secondary)
+                                                    }
                                                 }
-                                                .frame(width: 135, alignment: .leading)
-                                            }.foregroundStyle(.primary)
+                                                .frame(width: layout.width, alignment: .leading)
+                                            }
+                                            .buttonStyle(.plain)
+                                            .foregroundStyle(.primary)
+                                            .accessibilityLabel(item.name)
                                         }
-                                    }.padding(.horizontal)
+                                    }.padding(.horizontal, layout.horizontalPadding)
                                 }
                             }
                         }
@@ -95,15 +128,6 @@ struct CatalogView: View {
                 }.refreshable { await load() }
             }
         }
-        .overlay { if loading && sections.isEmpty { ProgressView() } }
-        .navigationTitle("Playbox")
-        .searchable(text: $searchText, prompt: "Movies and series")
-        .onSubmit(of: .search) { Task { await search() } }
-        .onChange(of: searchText) { _, value in
-            if value.isEmpty { Task { await load() } }
-        }
-        .navigationDestination(for: MetaPreview.self) { DetailView(item: $0) }
-        .task { await load() }
     }
 
     private func search() async {
