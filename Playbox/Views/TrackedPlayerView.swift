@@ -21,6 +21,13 @@ struct TrackedPlayerView: View {
     @State private var statusObserver: NSKeyValueObservation?
     @State private var failureObserver: NSObjectProtocol?
     @State private var endedObserver: NSObjectProtocol?
+    @State private var playbackStatusObserver: NSKeyValueObservation?
+    @State private var selectedPlaybackRate: Double = 1
+    @State private var isSeeking = false
+    @State private var pendingDirectSeekSeconds: Double?
+    @State private var seekShouldResume = false
+    @State private var seekID = UUID()
+    @State private var seekMessage: String?
     @State private var errorMessage: String?
     @State private var isLoading = true
     @State private var isRebuffering = false
@@ -95,12 +102,31 @@ struct TrackedPlayerView: View {
                             .background(.black.opacity(0.58), in: Circle())
                     }
                     .accessibilityLabel("Close player")
-                    Spacer()
+                    Spacer(minLength: 0)
+                    Button { seekDirect(seconds: -10) } label: {
+                        Image(systemName: "gobackward.10").frame(width: 44, height: 44)
+                    }
+                    .accessibilityLabel("Go back 10 seconds")
+                    .disabled(player.currentItem == nil || errorMessage != nil)
+                    Button { seekDirect(seconds: 10) } label: {
+                        Image(systemName: "goforward.10").frame(width: 44, height: 44)
+                    }
+                    .accessibilityLabel("Skip forward 10 seconds")
+                    .disabled(player.currentItem == nil || errorMessage != nil)
+                    directSpeedMenu
                     ccMenu
                 }
+                .foregroundStyle(.white)
                 .padding(.horizontal, 18)
                 .padding(.top, 12)
 
+                if let seekMessage {
+                    Text(seekMessage)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .padding(10)
+                        .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+                }
                 Spacer()
 
                 if let subtitleText = subtitleController.text(at: playbackSeconds) {
@@ -120,9 +146,9 @@ struct TrackedPlayerView: View {
 
             PlaybackGestureHUD(controller: gestureController)
 
-            if (isLoading || isRebuffering || isPreparingResume), errorMessage == nil {
+            if (isLoading || isRebuffering || isPreparingResume || isSeeking), errorMessage == nil {
                 VStack(spacing: 12) {
-                    ProgressView(isPreparingResume ? "Resuming video…" : (isRebuffering ? "Buffering video…" : "Opening video…"))
+                    ProgressView(isSeeking ? "Seeking video…" : (isPreparingResume ? "Resuming video…" : (isRebuffering ? "Buffering video…" : "Opening video…")))
                         .tint(.white)
                     if bufferedSeconds > 0 {
                         Text("\(Int(bufferedSeconds)) seconds ready to play")
@@ -155,6 +181,77 @@ struct TrackedPlayerView: View {
             }
         }
         .preferredColorScheme(.dark)
+    }
+
+    private var directSpeedMenu: some View {
+        Menu {
+            ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { speed in
+                Button {
+                    selectedPlaybackRate = speed
+                    if player.timeControlStatus == .playing { player.rate = Float(speed) }
+                } label: {
+                    let title = "\(String(format: "%g", speed))×"
+                    if abs(selectedPlaybackRate - speed) < 0.01 {
+                        Label(title, systemImage: "checkmark")
+                    } else {
+                        Text(title)
+                    }
+                }
+            }
+        } label: {
+            Text("\(String(format: "%g", selectedPlaybackRate))×")
+                .font(.subheadline.bold())
+                .frame(minWidth: 44, minHeight: 44)
+                .background(.black.opacity(0.58), in: Capsule())
+        }
+        .accessibilityLabel("Playback speed")
+    }
+
+    @MainActor
+    private func seekDirect(seconds offset: Double) {
+        guard let currentItem = player.currentItem, errorMessage == nil else { return }
+        let duration = currentItem.duration.seconds
+        let position = player.currentTime().seconds
+        guard duration.isFinite, duration > 0, position.isFinite else { return }
+        let targetSeconds = min(max((pendingDirectSeekSeconds ?? position) + offset, 0), max(0, duration - 0.1))
+        let target = targetSeconds / duration
+        if !isSeeking { seekShouldResume = isPreparingResume || player.timeControlStatus != .paused }
+        let wasPlaying = seekShouldResume
+        pendingDirectSeekSeconds = targetSeconds
+        seekID = UUID()
+        let requestID = seekID
+        resumeTask?.cancel()
+        currentItem.cancelPendingSeeks()
+        isPreparingResume = false
+        isSeeking = true
+        seekMessage = nil
+        player.pause()
+        onPlaybackEvent?(.seekRequested(target))
+        resumeTask = Task { @MainActor in
+            let ready = await prepareSeek?(target) ?? true
+            guard !Task.isCancelled, player.currentItem === currentItem, seekID == requestID else { return }
+            var completed = false
+            if ready {
+                completed = await player.seek(to: CMTime(seconds: targetSeconds, preferredTimescale: 600))
+            }
+            guard !Task.isCancelled, player.currentItem === currentItem, seekID == requestID else { return }
+            isSeeking = false
+            pendingDirectSeekSeconds = nil
+            if completed {
+                hasEnded = false
+                onPlaybackEvent?(.seekReady(target))
+            } else {
+                seekMessage = "The video could not seek to that position. Try again or choose another source."
+                onPlaybackPosition?(position, duration)
+            }
+            if wasPlaying { playDirect() }
+        }
+    }
+
+    @MainActor
+    private func playDirect() {
+        player.play()
+        player.rate = Float(selectedPlaybackRate)
     }
 
     @ViewBuilder
@@ -201,6 +298,10 @@ struct TrackedPlayerView: View {
         isLoading = true
         isRebuffering = false
         isPreparingResume = false
+        isSeeking = false
+        pendingDirectSeekSeconds = nil
+        seekShouldResume = false
+        seekMessage = nil
         hasBegunPlayback = false
         hasEnded = false
         bufferedSeconds = 0
@@ -229,6 +330,7 @@ struct TrackedPlayerView: View {
                         isPreparingResume = true
                         resumeTask?.cancel()
                         resumeTask = Task { @MainActor in
+                            guard !Task.isCancelled, player.currentItem === observed, errorMessage == nil else { return }
                             let duration = observed.duration.seconds
                             if duration.isFinite, duration > 0 {
                                 let target = min(max(resume / duration, 0), 0.999)
@@ -236,16 +338,21 @@ struct TrackedPlayerView: View {
                                 let ready = await prepareSeek?(target) ?? true
                                 guard !Task.isCancelled, player.currentItem === observed else { return }
                                 if ready {
-                                    await player.seek(to: CMTime(seconds: target * duration, preferredTimescale: 600))
+                                    let completed = await player.seek(to: CMTime(seconds: target * duration, preferredTimescale: 600))
                                     guard !Task.isCancelled, player.currentItem === observed else { return }
-                                    onPlaybackEvent?(.seekReady(target))
+                                    if completed {
+                                        onPlaybackEvent?(.seekReady(target))
+                                    } else {
+                                        seekMessage = "The saved position could not be restored. Playback will start from the current position."
+                                    }
                                 }
                             }
+                            guard !Task.isCancelled, player.currentItem === observed, errorMessage == nil else { return }
                             isPreparingResume = false
-                            player.play()
+                            playDirect()
                         }
                     } else {
-                        player.play()
+                        playDirect()
                     }
                 case .failed:
                     reportFailure(friendlyMessage(for: observed.error))
@@ -281,6 +388,19 @@ struct TrackedPlayerView: View {
             }
         }
 
+        playbackStatusObserver = player.observe(\.timeControlStatus, options: [.new]) { _, _ in
+            Task { @MainActor in
+                guard player.currentItem === playerItem else { return }
+                if player.timeControlStatus == .playing, !isSeeking, !isPreparingResume {
+                    if abs(Double(player.rate) - selectedPlaybackRate) > 0.01 {
+                        player.rate = Float(selectedPlaybackRate)
+                    }
+                } else if player.timeControlStatus == .paused, !isSeeking, !isPreparingResume, hasBegunPlayback, !hasEnded {
+                    isRebuffering = false
+                    onPlaybackEvent?(.paused)
+                }
+            }
+        }
         startProgressMonitor(playerItem)
         // The ready observer starts playback after applying the saved position.
     }
@@ -302,7 +422,7 @@ struct TrackedPlayerView: View {
                     return max(longest, end - playbackSeconds)
                 }
 
-                if !isPreparingResume, errorMessage == nil, !hasEnded {
+                if !isPreparingResume, !isSeeking, errorMessage == nil, !hasEnded {
                     let advancing = player.timeControlStatus == .playing && playbackSeconds > lastSeconds + 0.01
                     if advancing {
                         isLoading = false
@@ -325,7 +445,7 @@ struct TrackedPlayerView: View {
 
                 let duration = playerItem.duration.seconds
                 let now = Date()
-                if hasBegunPlayback, !isPreparingResume,
+                if hasBegunPlayback, !isPreparingResume, !isSeeking, errorMessage == nil,
                    duration.isFinite, duration > 0, playbackSeconds.isFinite {
                     if player.timeControlStatus == .playing, now.timeIntervalSince(lastReportedAt) >= 1 {
                         lastReportedAt = now
@@ -350,8 +470,15 @@ struct TrackedPlayerView: View {
     private func reportFailure(_ message: String) {
         guard errorMessage == nil else { return }
         errorMessage = message
+        resumeTask?.cancel()
+        resumeTask = nil
+        player.currentItem?.cancelPendingSeeks()
+        isPreparingResume = false
+        isSeeking = false
+        pendingDirectSeekSeconds = nil
         isLoading = false
         isRebuffering = false
+        player.pause()
         onPlaybackEvent?(.failed(message))
     }
 
@@ -370,7 +497,10 @@ struct TrackedPlayerView: View {
 
     @MainActor
     private func cleanupCurrentItem() {
+        playbackStatusObserver?.invalidate()
+        playbackStatusObserver = nil
         player.pause()
+        seekID = UUID()
         statusObserver?.invalidate()
         statusObserver = nil
         if let failureObserver { NotificationCenter.default.removeObserver(failureObserver) }
@@ -388,7 +518,7 @@ struct TrackedPlayerView: View {
     @MainActor
     private func stopPlayback() {
         let duration = player.currentItem?.duration.seconds ?? 0
-        if hasBegunPlayback, !isPreparingResume, duration.isFinite, duration > 0 {
+        if hasBegunPlayback, !isPreparingResume, !isSeeking, errorMessage == nil, duration.isFinite, duration > 0 {
             library.updatePlayback(item, position: playbackSeconds, duration: duration)
         }
         cleanupCurrentItem()

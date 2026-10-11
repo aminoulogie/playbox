@@ -7,6 +7,7 @@ enum PlaybackMetricEvent: Sendable {
     case firstFrame
     case stalled
     case resumed
+    case paused
     case seekRequested(Double)
     case seekReady(Double)
     case failed(String)

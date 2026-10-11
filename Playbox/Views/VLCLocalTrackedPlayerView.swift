@@ -141,7 +141,7 @@ struct VLCLocalTrackedPlayerView: View {
                         Text("Position: \(controller.currentTimeText) / \(controller.durationText)")
                         Text("Playback speed: \(String(format: "%g", controller.playbackRate))×")
                         if let progress = bufferedProgress {
-                            Text("Available through: \(Int(min(max(progress, 0), 1) * 100))%")
+                            Text("Estimated buffer position: \(Int(min(max(progress, 0), 1) * 100))%")
                         }
                         if let playbackDiagnostics {
                             Text(playbackDiagnostics)
@@ -229,7 +229,7 @@ struct VLCLocalTrackedPlayerView: View {
             if let progress = bufferedProgress {
                 ProgressView(value: min(max(progress, 0), 1))
                     .tint(.white.opacity(0.6))
-                    .accessibilityLabel("Torrent data available")
+                    .accessibilityLabel("Estimated buffer position")
                     .accessibilityValue("\(Int(min(max(progress, 0), 1) * 100)) percent")
             }
 
@@ -402,6 +402,7 @@ final class VLCTorrentPlayerController: NSObject, ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var seekError: String?
     @Published private(set) var playbackRate: Double = 1
+    @Published private(set) var didEnd = false
     @Published private(set) var currentMilliseconds: Int = 0
     @Published private(set) var durationMilliseconds: Int = 0
 
@@ -409,7 +410,8 @@ final class VLCTorrentPlayerController: NSObject, ObservableObject {
     var onPlaybackPosition: ((Double, Double) -> Void)?
     var onPlaybackEvent: ((PlaybackMetricEvent) -> Void)?
 
-    private let player = VLCMediaPlayer()
+    private var player = VLCMediaPlayer()
+    private var sessionDelegate: VLCSessionDelegate?
     private var pollTask: Task<Void, Never>?
     private var seekTask: Task<Void, Never>?
     private var pendingResumeSeconds: Double?
@@ -427,7 +429,7 @@ final class VLCTorrentPlayerController: NSObject, ObservableObject {
     var currentSeconds: Double { Double(max(0, currentMilliseconds)) / 1000 }
     var durationSeconds: Double { Double(max(0, durationMilliseconds)) / 1000 }
     var canRecordProgress: Bool {
-        hasBegunPlayback && !isSeeking && pendingResumeSeconds == nil && durationSeconds > 0
+        hasBegunPlayback && errorMessage == nil && !isSeeking && pendingResumeSeconds == nil && durationSeconds > 0
     }
     var progress: Double {
         guard durationMilliseconds > 0 else { return 0 }
@@ -444,21 +446,35 @@ final class VLCTorrentPlayerController: NSObject, ObservableObject {
     var stateText: String {
         if let statusText { return statusText }
         if errorMessage != nil { return "Stopped with an error" }
+        if didEnd { return "Finished" }
         return isPlaying ? "Playing" : "Paused"
     }
 
-    override init() {
-        super.init()
-        player.delegate = self
-    }
+    override init() { super.init() }
 
     func attach(to view: UIView) {
         if (player.drawable as? UIView) !== view { player.drawable = view }
     }
 
     func start(url: URL, resumeSeconds: Double) {
+        let drawable = player.drawable
         stop()
+        // VLCKit's stop is asynchronous. A fresh player isolates the old stopping input.
+        player = VLCMediaPlayer()
+        player.drawable = drawable
         sessionID = UUID()
+        let activeSession = sessionID
+        sessionDelegate = VLCSessionDelegate(
+            onRefresh: { [weak self] in
+                guard let self, self.sessionID == activeSession else { return }
+                self.refresh()
+            },
+            onBuffer: { [weak self] progress in
+                guard let self, self.sessionID == activeSession else { return }
+                self.bufferingChanged(progress)
+            }
+        )
+        player.delegate = sessionDelegate
         isOpening = true
         isActive = true
         userPaused = false
@@ -467,6 +483,7 @@ final class VLCTorrentPlayerController: NSObject, ObservableObject {
         currentMilliseconds = 0
         durationMilliseconds = 0
         hasBegunPlayback = false
+        didEnd = false
         lastClockMilliseconds = 0
         lastAdvancedAt = Date()
         lastReportedAt = .distantPast
@@ -495,9 +512,16 @@ final class VLCTorrentPlayerController: NSObject, ObservableObject {
 
     func togglePlayback() {
         guard isActive, errorMessage == nil else { return }
+        if didEnd {
+            userPaused = false
+            seek(to: 0)
+            return
+        }
         userPaused.toggle()
         if userPaused {
             player.pause()
+            isBuffering = false
+            onPlaybackEvent?(.paused)
         } else if !isSeeking {
             lastAdvancedAt = Date()
             player.play()
@@ -526,6 +550,8 @@ final class VLCTorrentPlayerController: NSObject, ObservableObject {
         let requestID = seekID
         let activeSession = sessionID
         let previousSeconds = currentSeconds
+        let wasStopped = player.state == .stopped
+        didEnd = false
         pendingResumeSeconds = nil
         pendingSeekProgress = target
         isSeeking = true
@@ -551,6 +577,22 @@ final class VLCTorrentPlayerController: NSObject, ObservableObject {
                 self.lastAdvancedAt = Date()
                 return
             }
+            if wasStopped {
+                // A naturally ended VLC input must reopen before position changes work.
+                self.player.play()
+                let reopenedAt = Date()
+                while self.player.state != .playing && self.player.state != .paused {
+                    guard !Task.isCancelled, self.isActive, self.sessionID == activeSession,
+                          self.seekID == requestID else { return }
+                    if self.player.state == .error || Date().timeIntervalSince(reopenedAt) > 8 {
+                        self.fail("VLC could not reopen the video. Try again or choose another source.")
+                        return
+                    }
+                    do { try await Task.sleep(for: .milliseconds(100)) }
+                    catch { return }
+                }
+                self.player.pause()
+            }
             self.player.position = target
             self.seekTargetSeconds = target * self.durationSeconds
             self.seekAppliedAt = Date()
@@ -571,8 +613,11 @@ final class VLCTorrentPlayerController: NSObject, ObservableObject {
         pollTask = nil
         seekTask?.cancel()
         seekTask = nil
+        player.delegate = nil
+        sessionDelegate = nil
         player.stop()
         player.media = nil
+        player.drawable = nil
         isPlaying = false
         isOpening = false
         isBuffering = false
@@ -585,6 +630,7 @@ final class VLCTorrentPlayerController: NSObject, ObservableObject {
 
     private func refresh() {
         guard isActive else { return }
+        let previousClockMilliseconds = currentMilliseconds
         currentMilliseconds = max(0, Int(player.time.intValue))
         durationMilliseconds = max(0, Int(player.media?.length.intValue ?? 0))
         let now = Date()
@@ -634,7 +680,7 @@ final class VLCTorrentPlayerController: NSObject, ObservableObject {
         }
         lastClockMilliseconds = currentMilliseconds
 
-        if hasBegunPlayback, !userPaused, !isSeeking,
+        if hasBegunPlayback, !userPaused, !isSeeking, player.state != .paused,
            now.timeIntervalSince(lastAdvancedAt) > 2.5, !isBuffering {
             isBuffering = true
             onPlaybackEvent?(.stalled)
@@ -645,22 +691,38 @@ final class VLCTorrentPlayerController: NSObject, ObservableObject {
             onPlaybackPosition?(currentSeconds, durationSeconds)
         }
 
+        if !hasBegunPlayback, !userPaused, !isSeeking,
+           now.timeIntervalSince(lastAdvancedAt) > 45, errorMessage == nil {
+            fail("The video did not begin playing within 45 seconds. Wait for more data and retry, or try another source.")
+            return
+        }
+
         if !hasBegunPlayback, player.state == .stopped, !isSeeking,
            now.timeIntervalSince(lastAdvancedAt) > 3, errorMessage == nil {
             fail("VLC stopped while opening this video. Wait for more data and try again, or choose another source.")
             return
         }
 
-        if hasBegunPlayback, player.state == .stopped, !isSeeking, errorMessage == nil {
-            if durationSeconds > 0, currentSeconds >= durationSeconds - 2 {
+        if hasBegunPlayback, player.state == .stopped, !isSeeking, !didEnd, errorMessage == nil {
+            if durationSeconds > 0, Double(max(currentMilliseconds, previousClockMilliseconds)) / 1000 >= durationSeconds - 2 {
                 isBuffering = false
                 isPlaying = false
+                userPaused = true
+                didEnd = true
                 onPlaybackEvent?(.ended)
-                isActive = false
             } else {
                 fail("The video stopped before its end. Wait for more torrent data and try again.")
             }
         }
+    }
+
+    private func bufferingChanged(_ progress: Float) {
+        guard isActive, !isSeeking, !userPaused else { return }
+        if progress < 1, hasBegunPlayback, !isBuffering {
+            isBuffering = true
+            onPlaybackEvent?(.stalled)
+        }
+        // Resume is reported when the playback clock advances again.
     }
 
     private func fail(_ message: String) {
@@ -691,27 +753,28 @@ final class VLCTorrentPlayerController: NSObject, ObservableObject {
     }
 }
 
-extension VLCTorrentPlayerController: VLCMediaPlayerDelegate {
+/// A separate delegate per input prevents queued callbacks from a stopped player
+/// being mistaken for events from a replacement player.
+@MainActor
+private final class VLCSessionDelegate: NSObject, VLCMediaPlayerDelegate {
+    private let onRefresh: () -> Void
+    private let onBuffer: (Float) -> Void
+
+    init(onRefresh: @escaping () -> Void, onBuffer: @escaping (Float) -> Void) {
+        self.onRefresh = onRefresh
+        self.onBuffer = onBuffer
+        super.init()
+    }
+
     nonisolated func mediaPlayerStateChanged(_ newState: VLCMediaPlayerState) {
-        Task { @MainActor [weak self] in
-            self?.refresh()
-        }
+        Task { @MainActor [weak self] in self?.onRefresh() }
     }
 
     nonisolated func mediaPlayerTimeChanged(_ aNotification: Notification) {
-        Task { @MainActor [weak self] in
-            self?.refresh()
-        }
+        Task { @MainActor [weak self] in self?.onRefresh() }
     }
 
     nonisolated func mediaPlayerBufferingChanged(_ progress: Float) {
-        Task { @MainActor [weak self] in
-            guard let self, self.isActive, !self.isSeeking, !self.userPaused else { return }
-            if progress < 1, self.hasBegunPlayback, !self.isBuffering {
-                self.isBuffering = true
-                self.onPlaybackEvent?(.stalled)
-            }
-            // Resume is reported when the playback clock advances again.
-        }
+        Task { @MainActor [weak self] in self?.onBuffer(progress) }
     }
 }
