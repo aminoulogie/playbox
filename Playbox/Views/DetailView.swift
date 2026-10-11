@@ -52,7 +52,12 @@ struct DetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task { await loadDetails() }
         .sheet(item: $playerURL) { value in
-            TrackedPlayerView(url: value.url, item: metadata ?? item)
+            TrackedPlayerView(
+                url: value.url,
+                item: metadata ?? item,
+                subtitles: value.subtitles,
+                selectedSubtitle: value.selectedSubtitle
+            )
         }
         .sheet(item: $torrentPlayerSession, onDismiss: {
             if activeTorrentAction == .play {
@@ -61,7 +66,9 @@ struct DetailView: View {
         }) { session in
             TorrentPlaybackView(
                 engine: session.engine,
-                item: metadata ?? item
+                item: metadata ?? item,
+                subtitles: session.subtitles,
+                selectedSubtitle: session.selectedSubtitle
             )
         }
         .onDisappear {
@@ -176,7 +183,13 @@ struct DetailView: View {
             ForEach(playableStreams) { stream in
                 HStack(spacing: 12) {
                     Button {
-                        if let url = stream.playableURL { playerURL = PlayableURL(url: url) }
+                        if let url = stream.playableURL {
+                            playerURL = PlayableURL(
+                                url: url,
+                                subtitles: subtitles,
+                                selectedSubtitle: selectedSubtitle
+                            )
+                        }
                     } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 4) {
@@ -438,6 +451,7 @@ struct DetailView: View {
         isLoadingSources = true
         streams = []
         subtitles = []
+        selectedSubtitle = nil
         defer { isLoadingSources = false }
         var foundStreams: [AddonStream] = []
         var foundSubtitles: [AddonSubtitle] = []
@@ -487,7 +501,11 @@ struct DetailView: View {
         torrentEngine = engine
 
         if action == .play {
-            torrentPlayerSession = TorrentPlayerSession(engine: engine)
+            torrentPlayerSession = TorrentPlayerSession(
+                engine: engine,
+                subtitles: subtitles,
+                selectedSubtitle: selectedSubtitle
+            )
         }
 
         torrentTask = Task { @MainActor in
@@ -642,11 +660,14 @@ private enum TorrentAction: Equatable {
 
 private struct PlayableURL: Identifiable {
     let url: URL
+    let subtitles: [AddonSubtitle]
+    let selectedSubtitle: AddonSubtitle?
     var id: String { url.absoluteString }
 }
-
 
 private struct TorrentPlayerSession: Identifiable {
     let id = UUID()
     let engine: TorrentEngine
+    let subtitles: [AddonSubtitle]
+    let selectedSubtitle: AddonSubtitle?
 }
