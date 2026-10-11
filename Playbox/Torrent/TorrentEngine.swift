@@ -302,9 +302,12 @@ final class TorrentEngine: ObservableObject {
         let speed = max(0, snapshot.bytesPerSecond ?? 0)
         let buffered = max(0, snapshot.streamingBufferedBytes ?? 0)
         let target = max(0, snapshot.streamingBufferTargetBytes ?? 0)
-        let startupProgress = target > 0
+        let headProgress = target > 0
             ? min(max(Double(buffered) / Double(target), 0), 1)
             : 0
+        let startupProgress = snapshot.streamingReadyPercent.map {
+            min(max($0 / 100.0, 0), 1)
+        } ?? headProgress
 
         downloadSpeed = speed
         bufferedBytes = buffered
