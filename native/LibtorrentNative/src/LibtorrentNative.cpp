@@ -91,6 +91,7 @@ struct JobState {
     lt::torrent_handle handle;
     std::optional<FileSelection> pending_selection;
     std::optional<int> primary_file_index;
+    bool file_selection_applied = false;
     std::string download_directory;
     bool completed_sent = false;
     bool stream_ready_sent = false;
@@ -1173,6 +1174,7 @@ bool apply_pending_selection(lt::torrent_handle &handle, JobState &state) {
     }
     state.primary_file_index = state.pending_selection->primary_file_index;
     state.pending_selection.reset();
+    state.file_selection_applied = true;
     invalidate_streaming_priorities(state);
     state.stream_ready_sent = false;
     state.completed_sent = false;
@@ -1309,6 +1311,7 @@ public:
                 state.job_id = request.job_id;
                 state.handle = handle;
                 state.pending_selection = pending_selection;
+                state.file_selection_applied = request.selection.has_value() && !pending_selection.has_value();
                 state.download_directory = request.download_directory;
                 if (request.selection.has_value()) {
                     state.primary_file_index = request.selection->primary_file_index;
@@ -1947,6 +1950,7 @@ private:
 
         const auto status = status_snapshot == nullptr ? handle.status() : *status_snapshot;
         std::optional<int> completion_primary;
+        bool completion_selection_applied = false;
         {
             std::lock_guard<std::mutex> guard(lock_);
             const auto iterator = jobs_.find(job_id);
@@ -1955,19 +1959,24 @@ private:
             }
             if (!iterator->second.pending_selection.has_value()) {
                 completion_primary = iterator->second.primary_file_index;
+                completion_selection_applied = iterator->second.file_selection_applied;
             }
         }
         bool completed = false;
-        if (status.is_finished && status.total_wanted > 0 && completion_primary.has_value()) {
-            if (const auto info = handle.torrent_file()) {
-                const auto &files = info->files();
-                const int primary = *completion_primary;
-                if (primary >= 0 && primary < files.num_files()) {
-                    const auto size = files.file_size(lt::file_index_t{primary});
-                    // is_finished can mean zero wanted files or a previous
-                    // asynchronous selection. Require the actual primary data.
-                    completed = size > 0 &&
-                        contiguous_file_bytes(handle, primary, status) >= size;
+        if (status.is_finished && status.total_wanted > 0 && completion_selection_applied) {
+            // Explicit Download selections may have no primary file.
+            completed = !completion_primary.has_value();
+            if (completion_primary.has_value()) {
+                if (const auto info = handle.torrent_file()) {
+                    const auto &files = info->files();
+                    const int primary = *completion_primary;
+                    if (primary >= 0 && primary < files.num_files()) {
+                        const auto size = files.file_size(lt::file_index_t{primary});
+                        // is_finished can mean zero wanted files or a previous
+                        // asynchronous selection. Require the actual primary data.
+                        completed = size > 0 &&
+                            contiguous_file_bytes(handle, primary, status) >= size;
+                    }
                 }
             }
         }
