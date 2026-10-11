@@ -5,9 +5,14 @@ import VLCKit
 struct VLCLocalTrackedPlayerView: View {
     let url: URL
     let item: MetaPreview
+    let subtitles: [AddonSubtitle]
+    let selectedSubtitle: AddonSubtitle?
 
     @EnvironmentObject private var library: LibraryStore
+    @AppStorage("playbox.player.verticalGestures") private var verticalGesturesEnabled = true
     @StateObject private var controller = VLCTorrentPlayerController()
+    @StateObject private var subtitleController = SubtitleOverlayController()
+    @StateObject private var gestureController = PlaybackGestureController()
     @State private var scrubValue: Double = 0
     @State private var isScrubbing = false
 
@@ -18,8 +23,32 @@ struct VLCLocalTrackedPlayerView: View {
             VLCVideoSurface(controller: controller)
                 .ignoresSafeArea()
 
-            VStack {
+            PlaybackGestureLayer(
+                controller: gestureController,
+                enabled: verticalGesturesEnabled
+            )
+            .ignoresSafeArea()
+
+            SystemVolumeHost(controller: gestureController)
+                .frame(width: 1, height: 1)
+                .opacity(0.001)
+                .allowsHitTesting(false)
+
+            VStack(spacing: 0) {
                 Spacer()
+
+                if let subtitleText = subtitleController.text(at: controller.currentSeconds) {
+                    Text(subtitleText)
+                        .font(.system(size: 20, weight: .semibold))
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.white)
+                        .shadow(color: .black, radius: 3)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 8)
+                        .background(.black.opacity(0.42), in: RoundedRectangle(cornerRadius: 8))
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 14)
+                }
 
                 VStack(spacing: 12) {
                     Slider(
@@ -49,6 +78,8 @@ struct VLCLocalTrackedPlayerView: View {
 
                         Spacer()
 
+                        ccMenu
+
                         Button {
                             controller.togglePlayback()
                         } label: {
@@ -69,6 +100,8 @@ struct VLCLocalTrackedPlayerView: View {
                 .background(.black.opacity(0.55))
             }
 
+            PlaybackGestureHUD(controller: gestureController)
+
             if controller.isOpening {
                 ProgressView("Opening buffered torrent…")
                     .padding(18)
@@ -77,6 +110,8 @@ struct VLCLocalTrackedPlayerView: View {
             }
         }
         .task {
+            subtitleController.select(selectedSubtitle)
+
             let resume = library.position(for: item)
             controller.start(url: url, resumeSeconds: resume)
 
@@ -100,6 +135,68 @@ struct VLCLocalTrackedPlayerView: View {
                 )
             }
             controller.stop()
+        }
+    }
+
+    @ViewBuilder
+    private var ccMenu: some View {
+        Menu {
+            Button {
+                subtitleController.select(nil)
+            } label: {
+                if subtitleController.selectedID == nil {
+                    Label("Off", systemImage: "checkmark")
+                } else {
+                    Text("Off")
+                }
+            }
+
+            ForEach(subtitles, id: \.stableID) { subtitle in
+                Button {
+                    subtitleController.select(subtitle)
+                } label: {
+                    let title = subtitle.lang?.uppercased() ?? "CC"
+                    if subtitleController.selectedID == subtitle.stableID {
+                        Label(title, systemImage: "checkmark")
+                    } else {
+                        Text(title)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "captions.bubble")
+                .font(.title3)
+                .frame(width: 40, height: 40)
+        }
+        .disabled(subtitles.isEmpty)
+        .opacity(subtitles.isEmpty ? 0.45 : 1)
+        .accessibilityLabel("Subtitles")
+    }
+}
+
+private struct PlaybackGestureLayer: View {
+    @ObservedObject var controller: PlaybackGestureController
+    let enabled: Bool
+
+    var body: some View {
+        GeometryReader { proxy in
+            Color.clear
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 8)
+                        .onChanged { value in
+                            guard enabled else { return }
+                            controller.update(
+                                startX: value.startLocation.x,
+                                translation: value.translation,
+                                width: proxy.size.width
+                            )
+                        }
+                        .onEnded { _ in
+                            guard enabled else { return }
+                            controller.end()
+                        }
+                )
         }
     }
 }
