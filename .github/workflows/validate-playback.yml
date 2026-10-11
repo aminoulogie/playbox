@@ -1,0 +1,114 @@
+name: Validate playback and poster controls
+
+on:
+  push:
+    branches: ['codex/playback-and-poster-controls']
+    paths:
+      - 'Playbox/**'
+      - 'native/**'
+      - 'project.yml'
+      - 'scripts/build_libtorrent_ios.sh'
+      - '.github/workflows/validate-playback.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Resolve release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          INPUT_VERSION=""
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION="${INPUT_VERSION#v}"
+          else
+            VERSION="1.0.${GITHUB_RUN_NUMBER}"
+          fi
+
+          if [[ ! "$VERSION" =~ ^[0-9]+([.][0-9]+){1,2}$ ]]; then
+            echo "Invalid release version: $VERSION"
+            echo "Use a numeric version such as 1.0.72."
+            exit 1
+          fi
+
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Resolved release version: $VERSION"
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install build dependencies
+        run: brew install xcodegen cmake boost
+
+      - name: Build libtorrent backend for iOS 17
+        env:
+          IOS_DEPLOYMENT_TARGET: "17.0"
+          LIBTORRENT_REF: "v2.0.13"
+        run: bash scripts/build_libtorrent_ios.sh
+
+      - name: Verify native frameworks
+        run: |
+          set -euo pipefail
+          test -f vendor/LibtorrentNative.framework/LibtorrentNative
+          test -f vendor/openssl.framework/openssl
+          otool -L vendor/LibtorrentNative.framework/LibtorrentNative
+          nm -gU vendor/LibtorrentNative.framework/LibtorrentNative | grep _tryagi_libtorrent_job_update_playback_position
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec project.yml
+
+      - name: Build for physical iPhone (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Playbox.xcodeproj \
+            -scheme Playbox \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            MARKETING_VERSION="$VERSION" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            INFOPLIST_KEY_CFBundleShortVersionString="$VERSION" \
+            INFOPLIST_KEY_CFBundleVersion="${{ github.run_number }}" \
+            build
+
+      - name: Verify embedded torrent frameworks
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/Playbox.app"
+          test -f "$APP/Frameworks/LibtorrentNative.framework/LibtorrentNative"
+          test -f "$APP/Frameworks/openssl.framework/openssl"
+          otool -L "$APP/Frameworks/LibtorrentNative.framework/LibtorrentNative"
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/Playbox.app"
+          test -d "$APP"
+          mkdir -p "$RUNNER_TEMP/package/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/package/Payload/"
+          (cd "$RUNNER_TEMP/package" && zip -qry "$GITHUB_WORKSPACE/Playbox-v${VERSION}.ipa" Payload)
+          cp "$GITHUB_WORKSPACE/Playbox-v${VERSION}.ipa" "$GITHUB_WORKSPACE/Playbox-latest.ipa"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist"
+          ls -lh "Playbox-v${VERSION}.ipa"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Playbox-unsigned-IPA
+          path: Playbox-v*.ipa
+          if-no-files-found: error
+          retention-days: 30
+

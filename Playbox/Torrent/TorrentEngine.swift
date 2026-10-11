@@ -242,6 +242,7 @@ final class TorrentEngine: ObservableObject {
             try? await nativeSession.cancel(jobId: jobID)
             guard currentJobID == jobID else { return }
             let message = error.localizedDescription
+            seekError = message
             clearJobReferences()
             update(
                 .failed(message),
@@ -302,7 +303,8 @@ final class TorrentEngine: ObservableObject {
         isSeeking = true
         seekError = nil
         seekBufferProgress = 0
-        positionUpdateTask?.cancel()
+        let previousPositionUpdate = positionUpdateTask
+        previousPositionUpdate?.cancel()
         defer {
             if seekRequestID == requestID {
                 isSeeking = false
@@ -311,7 +313,9 @@ final class TorrentEngine: ObservableObject {
         }
 
         do {
+            await previousPositionUpdate?.value
             try Task.checkCancellation()
+            guard currentJobID == jobID, seekRequestID == requestID else { return completedFile }
             try await session.updatePlaybackPosition(jobId: jobID, progress: requested)
             let deadline = Date().addingTimeInterval(30)
             while Date() < deadline {
@@ -354,12 +358,17 @@ final class TorrentEngine: ObservableObject {
                 stallStartedAt = Date()
                 rebufferCount += 1
             }
-        case .resumed, .ended:
+        case .resumed, .ended, .paused:
             finishStall()
         case .failed(let message):
             finishStall()
             seekError = message
-        case .opening, .seekRequested, .seekReady:
+        case .opening:
+            seekError = nil
+            finishStall()
+        case .seekRequested:
+            finishStall()
+        case .seekReady:
             break
         }
     }
@@ -534,11 +543,13 @@ final class TorrentEngine: ObservableObject {
     }
 
     private func stopCurrentJob() async {
-        positionUpdateTask?.cancel()
+        let previousPositionUpdate = positionUpdateTask
+        previousPositionUpdate?.cancel()
         positionUpdateTask = nil
         seekRequestID = nil
         isSeeking = false
         finishStall()
+        await previousPositionUpdate?.value
         if let session, let currentJobID {
             try? await session.cancel(jobId: currentJobID)
         }

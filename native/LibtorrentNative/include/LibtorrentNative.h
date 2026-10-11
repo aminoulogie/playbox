@@ -16,6 +16,7 @@ void tryagi_libtorrent_session_destroy(void *session);
 int tryagi_libtorrent_job_start(void *session, const char *json);
 int tryagi_libtorrent_job_apply_selection(void *session, const char *json);
 int tryagi_libtorrent_job_update_rate_limits(void *session, const char *json);
+int tryagi_libtorrent_job_update_playback_position(void *session, const char *json);
 int tryagi_libtorrent_job_reannounce(void *session, const char *json);
 int tryagi_libtorrent_job_refresh_peers(void *session, const char *json);
 int tryagi_libtorrent_job_pause(void *session, const char *json);

@@ -34,9 +34,16 @@ struct TorrentPlaybackView: View {
                 .ignoresSafeArea()
             } else {
                 VStack(spacing: 11) {
-                    SegmentedLoadingSpinner()
-                        .frame(width: 68, height: 68)
-                        .padding(.bottom, 2)
+                    if case .failed = engine.state {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 44))
+                            .foregroundStyle(.orange)
+                            .padding(.bottom, 2)
+                    } else {
+                        SegmentedLoadingSpinner()
+                            .frame(width: 68, height: 68)
+                            .padding(.bottom, 2)
+                    }
 
                     Text("Cache loading")
                         .font(.system(size: 14, weight: .medium))
@@ -81,6 +88,21 @@ struct TorrentPlaybackView: View {
                     .padding(.top, 5)
                 }
                 .padding(.horizontal, 24)
+            }
+        }
+        .overlay {
+            if streamURL != nil, case .failed(let message) = engine.state {
+                VStack(spacing: 14) {
+                    Image(systemName: "exclamationmark.triangle").font(.largeTitle)
+                    Text("Torrent source stopped").font(.headline)
+                    Text(message).font(.subheadline).multilineTextAlignment(.center)
+                    Button("Choose another source") { dismiss() }
+                        .buttonStyle(.borderedProminent)
+                }
+                .foregroundStyle(.white)
+                .padding(24)
+                .background(.black.opacity(0.9), in: RoundedRectangle(cornerRadius: 18))
+                .padding(24)
             }
         }
         .onReceive(engine.$state) { state in

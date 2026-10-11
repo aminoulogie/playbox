@@ -22,6 +22,7 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <cstdint>
 #include <cstdio>
@@ -90,10 +91,19 @@ struct JobState {
     lt::torrent_handle handle;
     std::optional<FileSelection> pending_selection;
     std::optional<int> primary_file_index;
+    bool file_selection_applied = false;
     std::string download_directory;
     bool completed_sent = false;
     bool stream_ready_sent = false;
-    int streaming_deadline_through = -1;
+    std::optional<double> playback_position;
+    bool playback_priorities_initialized = false;
+    int streaming_anchor_piece = -1;
+    int streaming_window_first = -1;
+    int streaming_window_last = -1;
+    std::vector<int> streaming_priority_pieces;
+    std::vector<int> streaming_deadline_pieces;
+    bool progress_dirty = true;
+    std::optional<std::chrono::steady_clock::time_point> last_progress_poll;
     struct SwarmEvents {
         struct Tracker {
             std::string last_event;
@@ -276,6 +286,35 @@ std::optional<long long> extract_json_int(const std::string &json, const std::st
     } catch (...) {
         return std::nullopt;
     }
+}
+
+std::optional<double> extract_json_double(const std::string &json, const std::string &key) {
+    const std::string needle = "\"" + key + "\"";
+    const auto key_position = json.find(needle);
+    if (key_position == std::string::npos) {
+        return std::nullopt;
+    }
+
+    const auto colon = json.find(':', key_position + needle.size());
+    if (colon == std::string::npos) {
+        return std::nullopt;
+    }
+    const char *start = json.c_str() + colon + 1;
+    while (*start != '\0' && std::isspace(static_cast<unsigned char>(*start))) {
+        ++start;
+    }
+    char *end = nullptr;
+    const double value = std::strtod(start, &end);
+    if (end == start || !std::isfinite(value)) {
+        return std::nullopt;
+    }
+    while (*end != '\0' && std::isspace(static_cast<unsigned char>(*end))) {
+        ++end;
+    }
+    if (*end != ',' && *end != '}' && *end != '\0') {
+        return std::nullopt;
+    }
+    return value;
 }
 
 std::optional<bool> extract_json_bool(const std::string &json, const std::string &key) {
@@ -828,9 +867,29 @@ std::optional<std::pair<int, int>> file_piece_span(
     return std::make_pair(first, last);
 }
 
+bool piece_available(const lt::torrent_status &status, int piece) {
+    return status.is_seeding || (
+        piece >= 0 && piece < status.pieces.size() &&
+        status.pieces[lt::piece_index_t{piece}]
+    );
+}
+
+std::int64_t playback_byte_offset(std::int64_t file_size, double progress) {
+    if (file_size <= 0) {
+        return 0;
+    }
+    // Time and byte positions differ in variable bitrate media. This is an
+    // estimate until the player can report exact file read offsets.
+    const long double estimated = static_cast<long double>(file_size) *
+        std::clamp(progress, 0.0, 1.0);
+    return static_cast<std::int64_t>(std::min<long double>(file_size - 1, estimated));
+}
+
 std::int64_t contiguous_file_bytes(
     const lt::torrent_handle &handle,
-    int file_index
+    int file_index,
+    const lt::torrent_status &status,
+    std::int64_t requested_offset = 0
 ) {
     const auto torrent_info = handle.torrent_file();
     const auto span = file_piece_span(handle, file_index);
@@ -842,33 +901,34 @@ std::int64_t contiguous_file_bytes(
     const lt::file_index_t index{file_index};
     const std::int64_t file_offset = files.file_offset(index);
     const std::int64_t file_size = files.file_size(index);
+    const std::int64_t local_offset = std::clamp<std::int64_t>(requested_offset, 0, file_size);
+    const std::int64_t range_start = file_offset + local_offset;
     const std::int64_t file_end = file_offset + file_size;
+    const auto piece_length = std::max(1, torrent_info->piece_length());
+    const int first = static_cast<int>(range_start / piece_length);
 
     std::int64_t contiguous = 0;
-    for (int piece = span->first; piece <= span->second; ++piece) {
-        const lt::piece_index_t piece_index{piece};
-        if (!handle.have_piece(piece_index)) {
+    for (int piece = first; piece <= span->second; ++piece) {
+        if (!piece_available(status, piece)) {
             break;
         }
-
-        const std::int64_t piece_start =
-            static_cast<std::int64_t>(piece) * torrent_info->piece_length();
-        const std::int64_t piece_end =
-            piece_start + torrent_info->piece_size(piece_index);
-        const std::int64_t overlap_start = std::max(file_offset, piece_start);
+        const lt::piece_index_t piece_index{piece};
+        const std::int64_t piece_start = static_cast<std::int64_t>(piece) * piece_length;
+        const std::int64_t piece_end = piece_start + torrent_info->piece_size(piece_index);
+        const std::int64_t overlap_start = std::max(range_start, piece_start);
         const std::int64_t overlap_end = std::min(file_end, piece_end);
         if (overlap_end > overlap_start) {
             contiguous += overlap_end - overlap_start;
         }
     }
-
-    return std::min(contiguous, file_size);
+    return std::min(contiguous, file_size - local_offset);
 }
 
 bool tail_ready_for_container(
     const lt::torrent_handle &handle,
     int file_index,
-    std::int64_t tail_bytes
+    std::int64_t tail_bytes,
+    const lt::torrent_status &status
 ) {
     const auto torrent_info = handle.torrent_file();
     if (!torrent_info) {
@@ -893,7 +953,7 @@ bool tail_ready_for_container(
     const int last = static_cast<int>((offset + size - 1) / piece_length);
 
     for (int piece = first; piece <= last; ++piece) {
-        if (!handle.have_piece(lt::piece_index_t{piece})) {
+        if (!piece_available(status, piece)) {
             return false;
         }
     }
@@ -903,7 +963,8 @@ bool tail_ready_for_container(
 double tail_download_progress(
     const lt::torrent_handle &handle,
     int file_index,
-    std::int64_t tail_bytes
+    std::int64_t tail_bytes,
+    const lt::torrent_status &status
 ) {
     const auto torrent_info = handle.torrent_file();
     if (!torrent_info) {
@@ -930,7 +991,7 @@ double tail_download_progress(
 
     int complete = 0;
     for (int piece = first; piece <= last; ++piece) {
-        if (handle.have_piece(lt::piece_index_t{piece})) {
+        if (piece_available(status, piece)) {
             ++complete;
         }
     }
@@ -954,7 +1015,21 @@ bool file_needs_tail_metadata(const std::string &path) {
     return ext == "mp4" || ext == "m4v" || ext == "mov";
 }
 
-void maintain_streaming_priorities(lt::torrent_handle &handle, JobState &state) {
+void invalidate_streaming_priorities(JobState &state) {
+    state.playback_priorities_initialized = false;
+    state.streaming_anchor_piece = -1;
+    state.streaming_window_first = -1;
+    state.streaming_window_last = -1;
+    state.streaming_priority_pieces.clear();
+    state.streaming_deadline_pieces.clear();
+    state.progress_dirty = true;
+}
+
+void maintain_streaming_priorities(
+    lt::torrent_handle &handle,
+    JobState &state,
+    const lt::torrent_status &status
+) {
     if (!state.primary_file_index.has_value()) {
         return;
     }
@@ -968,54 +1043,141 @@ void maintain_streaming_priorities(lt::torrent_handle &handle, JobState &state) 
 
     const auto &files = torrent_info->files();
     const lt::file_index_t index{file_index};
-    const std::string path = files.file_path(index);
+    const auto size = files.file_size(index);
+    const auto file_offset = files.file_offset(index);
+    const auto piece_length = std::max(1, torrent_info->piece_length());
+    const bool following_playback = state.playback_position.has_value();
+    const auto requested_offset = following_playback
+        ? playback_byte_offset(size, *state.playback_position)
+        : 0;
+    const int anchor = static_cast<int>((file_offset + requested_offset) / piece_length);
 
-    int frontier = span->first;
-    while (frontier <= span->second && handle.have_piece(lt::piece_index_t{frontier})) {
+    // Use one bitmap snapshot rather than synchronously querying each piece.
+    int frontier = anchor;
+    while (frontier <= span->second && piece_available(status, frontier)) {
         ++frontier;
     }
-
     const int window_last = std::min(span->second, frontier + 96);
-    const int begin = std::max(frontier, state.streaming_deadline_through + 1);
-    for (int piece = begin; piece <= window_last; ++piece) {
-        const auto piece_index = lt::piece_index_t{piece};
-        handle.piece_priority(piece_index, lt::top_priority);
-        handle.set_piece_deadline(piece_index, (piece - frontier + 1) * 250);
-    }
-    state.streaming_deadline_through = std::max(state.streaming_deadline_through, window_last);
+    const int lookbehind_first = std::max(span->first, anchor - 4);
 
-    // Containers such as MP4/MOV may keep seek/index metadata at the end.
-    // Prioritize a small tail region in parallel with the forward window.
-    if (file_needs_tail_metadata(path)) {
-        const auto size = files.file_size(index);
-        const auto offset = files.file_offset(index);
-        const auto tail_start = offset + std::max<std::int64_t>(0, size - (1 * 1024 * 1024));
-        const auto piece_length = std::max(1, torrent_info->piece_length());
-        const int tail_first = static_cast<int>(tail_start / piece_length);
-        for (int piece = tail_first; piece <= span->second; ++piece) {
-            const auto piece_index = lt::piece_index_t{piece};
-            handle.piece_priority(piece_index, lt::top_priority);
-            if (!handle.have_piece(piece_index)) {
-                handle.set_piece_deadline(piece_index, 25 + (piece - tail_first) * 20);
+    std::vector<int> priorities;
+    std::unordered_map<int, int> deadlines;
+    const auto add_range = [&](int first, int last, int base_ms, int step_ms) {
+        for (int piece = first; piece <= last; ++piece) {
+            priorities.push_back(piece);
+            if (!piece_available(status, piece)) {
+                const int due_ms = base_ms + (piece - first) * step_ms;
+                const auto result = deadlines.emplace(piece, due_ms);
+                if (!result.second) {
+                    result.first->second = std::min(result.first->second, due_ms);
+                }
+            }
+        }
+    };
+    add_range(frontier, window_last, 250, 250);
+    if (following_playback) {
+        // Decoder seeks may read the keyframe immediately before the target.
+        add_range(lookbehind_first, anchor, 100, 20);
+        // Keep the startup header available after a seek away from the start.
+        const auto head_end = file_offset + std::min<std::int64_t>(size, 1LL * 1024LL * 1024LL) - 1;
+        const int head_last = static_cast<int>(head_end / piece_length);
+        add_range(span->first, head_last, 25, 20);
+    }
+    if (file_needs_tail_metadata(files.file_path(index))) {
+        const auto tail_start = file_offset + std::max<std::int64_t>(0, size - (1LL * 1024LL * 1024LL));
+        add_range(static_cast<int>(tail_start / piece_length), span->second, 25, 20);
+    }
+    std::sort(priorities.begin(), priorities.end());
+    priorities.erase(std::unique(priorities.begin(), priorities.end()), priorities.end());
+
+    using PiecePriority = std::pair<lt::piece_index_t, lt::download_priority_t>;
+    std::vector<PiecePriority> changes;
+    if (following_playback && !state.playback_priorities_initialized) {
+        // File selection marks the entire primary file top priority. Lower
+        // only its pieces so the moving playback window actually wins.
+        changes.reserve(static_cast<std::size_t>(span->second - span->first + 1));
+        for (int piece = span->first; piece <= span->second; ++piece) {
+            const bool urgent = std::binary_search(priorities.begin(), priorities.end(), piece);
+            changes.emplace_back(
+                lt::piece_index_t{piece},
+                urgent ? lt::top_priority : lt::default_priority
+            );
+        }
+        state.playback_priorities_initialized = true;
+    } else {
+        if (following_playback) {
+            for (const int piece : state.streaming_priority_pieces) {
+                if (!std::binary_search(priorities.begin(), priorities.end(), piece)) {
+                    changes.emplace_back(lt::piece_index_t{piece}, lt::default_priority);
+                }
+            }
+        }
+        for (const int piece : priorities) {
+            if (!std::binary_search(
+                state.streaming_priority_pieces.begin(),
+                state.streaming_priority_pieces.end(),
+                piece
+            )) {
+                changes.emplace_back(lt::piece_index_t{piece}, lt::top_priority);
             }
         }
     }
+    if (!changes.empty()) {
+        // This overload leaves every other selected/unselected file untouched.
+        handle.prioritize_pieces(changes);
+    }
+
+    std::vector<int> deadline_pieces;
+    deadline_pieces.reserve(deadlines.size());
+    for (const auto &[piece, _] : deadlines) {
+        deadline_pieces.push_back(piece);
+    }
+    std::sort(deadline_pieces.begin(), deadline_pieces.end());
+    const bool window_changed =
+        state.streaming_anchor_piece != anchor ||
+        state.streaming_window_first != frontier ||
+        state.streaming_window_last != window_last;
+    if (window_changed) {
+        // Seek deadlines from the previous position must not compete with the
+        // new position. Head/tail requirements are reapplied below.
+        handle.clear_piece_deadlines();
+    } else {
+        for (const int piece : state.streaming_deadline_pieces) {
+            if (!std::binary_search(deadline_pieces.begin(), deadline_pieces.end(), piece)) {
+                handle.reset_piece_deadline(lt::piece_index_t{piece});
+            }
+        }
+    }
+    for (const auto &[piece, due_ms] : deadlines) {
+        if (window_changed || !std::binary_search(
+            state.streaming_deadline_pieces.begin(),
+            state.streaming_deadline_pieces.end(),
+            piece
+        )) {
+            handle.set_piece_deadline(lt::piece_index_t{piece}, due_ms);
+        }
+    }
+
+    state.streaming_anchor_piece = anchor;
+    state.streaming_window_first = frontier;
+    state.streaming_window_last = window_last;
+    state.streaming_priority_pieces = std::move(priorities);
+    state.streaming_deadline_pieces = std::move(deadline_pieces);
 }
 
 bool apply_pending_selection(lt::torrent_handle &handle, JobState &state) {
-    if (state.pending_selection.has_value()) {
-        if (!apply_file_selection(handle, *state.pending_selection)) {
-            return false;
-        }
-        if (state.pending_selection->primary_file_index.has_value()) {
-            state.primary_file_index = state.pending_selection->primary_file_index;
-        }
-        state.pending_selection.reset();
-        state.streaming_deadline_through = -1;
-        state.stream_ready_sent = false;
+    if (!state.pending_selection.has_value()) {
+        return true;
     }
-
-    maintain_streaming_priorities(handle, state);
+    if (!apply_file_selection(handle, *state.pending_selection)) {
+        return false;
+    }
+    state.primary_file_index = state.pending_selection->primary_file_index;
+    state.pending_selection.reset();
+    state.file_selection_applied = true;
+    invalidate_streaming_priorities(state);
+    state.stream_ready_sent = false;
+    state.completed_sent = false;
     return true;
 }
 
@@ -1149,6 +1311,7 @@ public:
                 state.job_id = request.job_id;
                 state.handle = handle;
                 state.pending_selection = pending_selection;
+                state.file_selection_applied = request.selection.has_value() && !pending_selection.has_value();
                 state.download_directory = request.download_directory;
                 if (request.selection.has_value()) {
                     state.primary_file_index = request.selection->primary_file_index;
@@ -1157,7 +1320,7 @@ public:
                 std::lock_guard<std::mutex> guard(lock_);
                 jobs_[request.job_id] = std::move(state);
             }
-            emit_progress(request.job_id, handle, false);
+            emit_progress(request.job_id, handle);
             return 0;
         } catch (const std::exception &error) {
             return fail(error.what());
@@ -1177,12 +1340,14 @@ public:
         std::lock_guard<std::mutex> guard(lock_);
         auto iterator = jobs_.find(job_id);
         if (iterator == jobs_.end()) {
-            return fail("selection request references an unknown jobId");
+            // fail() also takes lock_; store the error directly while locked.
+            last_error_ = "selection request references an unknown jobId";
+            return -1;
         }
         iterator->second.pending_selection = selection;
-        iterator->second.primary_file_index = selection->primary_file_index;
         iterator->second.stream_ready_sent = false;
-        iterator->second.streaming_deadline_through = -1;
+        iterator->second.handle.clear_piece_deadlines();
+        invalidate_streaming_priorities(iterator->second);
         apply_pending_selection(iterator->second.handle, iterator->second);
         return 0;
     }
@@ -1194,6 +1359,27 @@ public:
         return with_handle(json, [&](lt::torrent_handle &handle) {
             apply_rate_limits(handle, download_rate_limit, upload_rate_limit);
         });
+    }
+
+    int update_playback_position(const char *json) {
+        const std::string request_json = json == nullptr ? "" : json;
+        const auto job_id = parse_job_id(json);
+        const auto progress = extract_json_double(request_json, "progress");
+        if (job_id.empty() || !progress.has_value()) {
+            return fail("playback position request requires jobId and finite progress");
+        }
+
+        std::lock_guard<std::mutex> guard(lock_);
+        auto iterator = jobs_.find(job_id);
+        if (iterator == jobs_.end()) {
+            last_error_ = "playback position request references an unknown jobId";
+            return -1;
+        }
+        // Accept before metadata arrives; selection and the worker apply the
+        // request as soon as the primary file is known.
+        iterator->second.playback_position = std::clamp(*progress, 0.0, 1.0);
+        iterator->second.progress_dirty = true;
+        return 0;
     }
 
     int reannounce(const char *json) {
@@ -1232,7 +1418,8 @@ public:
             std::lock_guard<std::mutex> guard(lock_);
             auto iterator = jobs_.find(job_id);
             if (iterator == jobs_.end()) {
-                return fail("cancel request references an unknown jobId");
+                last_error_ = "cancel request references an unknown jobId";
+                return -1;
             }
             handle = iterator->second.handle;
             jobs_.erase(iterator);
@@ -1262,7 +1449,8 @@ private:
             std::lock_guard<std::mutex> guard(lock_);
             auto iterator = jobs_.find(job_id);
             if (iterator == jobs_.end()) {
-                return fail("control request references an unknown jobId");
+                last_error_ = "control request references an unknown jobId";
+                return -1;
             }
             handle = iterator->second.handle;
         }
@@ -1383,12 +1571,47 @@ private:
         };
     }
 
+    void record_file_priorities_applied(const lt::torrent_handle &handle) {
+        std::lock_guard<std::mutex> guard(lock_);
+        for (auto &[_, state] : jobs_) {
+            if (state.handle == handle) {
+                // File priorities finish asynchronously and reset piece
+                // overrides. Rebuild even when the playhead has not moved.
+                invalidate_streaming_priorities(state);
+            }
+        }
+    }
+
+    void emit_completed_for_handle(const lt::torrent_handle &handle) {
+        std::vector<std::string> job_ids;
+        {
+            std::lock_guard<std::mutex> guard(lock_);
+            for (const auto &[job_id, state] : jobs_) {
+                if (state.handle == handle) {
+                    job_ids.push_back(job_id);
+                }
+            }
+        }
+        if (!handle.is_valid()) {
+            return;
+        }
+        const auto status = handle.status();
+        for (const auto &job_id : job_ids) {
+            emit_stream_ready_if_possible(job_id, handle, status);
+            emit_progress(job_id, handle, &status);
+        }
+    }
+
     void process_alerts() {
         std::vector<lt::alert *> alerts;
         session_.pop_alerts(&alerts);
 
         for (const auto *alert : alerts) {
-            if (const auto *tracker = lt::alert_cast<lt::tracker_announce_alert>(alert)) {
+            if (const auto *priority = lt::alert_cast<lt::file_prio_alert>(alert)) {
+                record_file_priorities_applied(priority->handle);
+            } else if (const auto *finished = lt::alert_cast<lt::torrent_finished_alert>(alert)) {
+                emit_completed_for_handle(finished->handle);
+            } else if (const auto *tracker = lt::alert_cast<lt::tracker_announce_alert>(alert)) {
                 record_tracker_event(*tracker, "announce");
             } else if (const auto *tracker = lt::alert_cast<lt::tracker_reply_alert>(alert)) {
                 record_tracker_event(*tracker, "reply", tracker->num_peers);
@@ -1590,25 +1813,49 @@ private:
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             process_alerts();
 
+            const auto now = std::chrono::steady_clock::now();
             std::vector<std::pair<std::string, lt::torrent_handle>> snapshot;
             {
                 std::lock_guard<std::mutex> guard(lock_);
-                for (auto &entry : jobs_) {
-                    apply_pending_selection(entry.second.handle, entry.second);
-                    snapshot.emplace_back(entry.first, entry.second.handle);
+                for (auto &[job_id, state] : jobs_) {
+                    if (state.completed_sent && !state.progress_dirty) {
+                        continue;
+                    }
+                    const bool due = !state.last_progress_poll.has_value() ||
+                        now - *state.last_progress_poll >= std::chrono::milliseconds(250);
+                    if (!due && !state.progress_dirty) {
+                        continue;
+                    }
+                    apply_pending_selection(state.handle, state);
+                    state.progress_dirty = false;
+                    state.last_progress_poll = now;
+                    snapshot.emplace_back(job_id, state.handle);
                 }
             }
 
-            for (const auto &entry : snapshot) {
-                emit_stream_ready_if_possible(entry.first, entry.second);
-                emit_progress(entry.first, entry.second, false);
+            for (const auto &[job_id, handle] : snapshot) {
+                if (!handle.is_valid()) {
+                    continue;
+                }
+                const auto status = handle.status();
+                {
+                    std::lock_guard<std::mutex> guard(lock_);
+                    const auto iterator = jobs_.find(job_id);
+                    if (iterator == jobs_.end()) {
+                        continue;
+                    }
+                    maintain_streaming_priorities(iterator->second.handle, iterator->second, status);
+                }
+                emit_stream_ready_if_possible(job_id, handle, status);
+                emit_progress(job_id, handle, &status);
             }
         }
     }
 
     void emit_stream_ready_if_possible(
         const std::string &job_id,
-        const lt::torrent_handle &handle
+        const lt::torrent_handle &handle,
+        const lt::torrent_status &status
     ) {
         if (callback_ == nullptr || !handle.is_valid()) {
             return;
@@ -1645,7 +1892,7 @@ private:
 
         const lt::file_index_t index{file_index};
         const auto file_size = files.file_size(index);
-        const auto available = contiguous_file_bytes(handle, file_index);
+        const auto available = contiguous_file_bytes(handle, file_index, status);
         const std::int64_t startup_target = std::min<std::int64_t>(
             file_size,
             1LL * 1024LL * 1024LL
@@ -1656,7 +1903,8 @@ private:
         const bool tail_ready = !tail_required || tail_ready_for_container(
             handle,
             file_index,
-            1LL * 1024LL * 1024LL
+            1LL * 1024LL * 1024LL,
+            status
         );
 
         if (available < startup_target || !tail_ready) {
@@ -1691,13 +1939,55 @@ private:
         callback_(payload.c_str(), context_);
     }
 
-    void emit_progress(const std::string &job_id, const lt::torrent_handle &handle, bool force_completed) {
+    void emit_progress(
+        const std::string &job_id,
+        const lt::torrent_handle &handle,
+        const lt::torrent_status *status_snapshot = nullptr
+    ) {
         if (callback_ == nullptr || !handle.is_valid()) {
             return;
         }
 
-        lt::torrent_status status = handle.status();
-        const bool completed = force_completed || status.is_finished;
+        const auto status = status_snapshot == nullptr ? handle.status() : *status_snapshot;
+        std::optional<int> completion_primary;
+        bool completion_selection_applied = false;
+        {
+            std::lock_guard<std::mutex> guard(lock_);
+            const auto iterator = jobs_.find(job_id);
+            if (iterator == jobs_.end()) {
+                return;
+            }
+            if (!iterator->second.pending_selection.has_value()) {
+                completion_primary = iterator->second.primary_file_index;
+                completion_selection_applied = iterator->second.file_selection_applied;
+            }
+        }
+        bool completed = false;
+        if (status.is_finished && status.total_wanted > 0 && completion_selection_applied) {
+            // Explicit Download selections may have no primary file.
+            completed = !completion_primary.has_value();
+            if (completion_primary.has_value()) {
+                if (const auto info = handle.torrent_file()) {
+                    const auto &files = info->files();
+                    const int primary = *completion_primary;
+                    if (primary >= 0 && primary < files.num_files()) {
+                        const auto size = files.file_size(lt::file_index_t{primary});
+                        // is_finished can mean zero wanted files or a previous
+                        // asynchronous selection. Require the actual primary data.
+                        completed = size > 0 &&
+                            contiguous_file_bytes(handle, primary, status) >= size;
+                    }
+                }
+            }
+        }
+        if (completed) {
+            std::lock_guard<std::mutex> guard(lock_);
+            const auto iterator = jobs_.find(job_id);
+            if (iterator == jobs_.end() || iterator->second.completed_sent) {
+                return;
+            }
+            iterator->second.completed_sent = true;
+        }
         const double percent = completed ? 100.0 : status.progress_ppm / 10000.0;
 
         std::ostringstream json;
@@ -1716,17 +2006,31 @@ private:
         std::int64_t streaming_buffered_bytes = 0;
         std::int64_t streaming_buffer_target_bytes = 0;
         double streaming_ready_percent = 0.0;
+        std::optional<double> playback_position;
+        std::optional<std::int64_t> playback_buffered_bytes;
+        std::optional<std::int64_t> playback_buffer_target_bytes;
         {
             std::lock_guard<std::mutex> guard(lock_);
             const auto iterator = jobs_.find(job_id);
+            if (iterator != jobs_.end()) {
+                playback_position = iterator->second.playback_position;
+            }
             if (iterator != jobs_.end() && iterator->second.primary_file_index.has_value()) {
                 const int primary = *iterator->second.primary_file_index;
-                streaming_buffered_bytes = contiguous_file_bytes(handle, primary);
+                streaming_buffered_bytes = contiguous_file_bytes(handle, primary, status);
                 if (const auto info = handle.torrent_file()) {
                     const auto &files = info->files();
                     if (primary >= 0 && primary < files.num_files()) {
                         const lt::file_index_t file_index{primary};
                         const auto file_size = files.file_size(file_index);
+                        if (playback_position.has_value() && file_size > 0) {
+                            const auto offset = playback_byte_offset(file_size, *playback_position);
+                            playback_buffered_bytes = contiguous_file_bytes(handle, primary, status, offset);
+                            playback_buffer_target_bytes = std::min<std::int64_t>(
+                                file_size - offset,
+                                1LL * 1024LL * 1024LL
+                            );
+                        }
                         streaming_buffer_target_bytes = std::min<std::int64_t>(
                             file_size,
                             1LL * 1024LL * 1024LL
@@ -1746,7 +2050,8 @@ private:
                             const double tail_progress = tail_download_progress(
                                 handle,
                                 primary,
-                                1LL * 1024LL * 1024LL
+                                1LL * 1024LL * 1024LL,
+                                status
                             );
                             streaming_ready_percent =
                                 (head_progress * 0.70 + tail_progress * 0.30) * 100.0;
@@ -1760,6 +2065,25 @@ private:
         json << "\"streamingBufferedBytes\":" << streaming_buffered_bytes << ",";
         json << "\"streamingBufferTargetBytes\":" << streaming_buffer_target_bytes << ",";
         json << "\"streamingReadyPercent\":" << streaming_ready_percent << ",";
+        json << "\"playbackPosition\":";
+        if (playback_position.has_value()) {
+            json << std::setprecision(17) << *playback_position;
+        } else {
+            json << "null";
+        }
+        json << ",\"playbackBufferedBytes\":";
+        if (playback_buffered_bytes.has_value()) {
+            json << *playback_buffered_bytes;
+        } else {
+            json << "null";
+        }
+        json << ",\"playbackBufferTargetBytes\":";
+        if (playback_buffer_target_bytes.has_value()) {
+            json << *playback_buffer_target_bytes;
+        } else {
+            json << "null";
+        }
+        json << ",";
         json << "\"peerCount\":" << status.num_peers << ",";
         json << "\"swarmDiagnostics\":";
         emit_swarm_diagnostics_json(json, job_id, handle, status);
@@ -1827,6 +2151,11 @@ int tryagi_libtorrent_job_apply_selection(void *session, const char *json) {
 int tryagi_libtorrent_job_update_rate_limits(void *session, const char *json) {
     auto *native_session = as_session(session);
     return native_session == nullptr ? -1 : native_session->update_rate_limits(json);
+}
+
+int tryagi_libtorrent_job_update_playback_position(void *session, const char *json) {
+    auto *native_session = as_session(session);
+    return native_session == nullptr ? -1 : native_session->update_playback_position(json);
 }
 
 int tryagi_libtorrent_job_reannounce(void *session, const char *json) {
