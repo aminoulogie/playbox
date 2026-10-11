@@ -6,23 +6,33 @@ struct TrackedPlayerView: View {
     let item: MetaPreview
     let subtitles: [AddonSubtitle]
     let selectedSubtitle: AddonSubtitle?
+    var bufferedProgress: Double? = nil
+    var playbackDiagnostics: String? = nil
+    var onPlaybackPosition: ((Double, Double) -> Void)? = nil
+    var prepareSeek: ((Double) async -> Bool)? = nil
+    var onPlaybackEvent: ((PlaybackMetricEvent) -> Void)? = nil
 
+    @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: LibraryStore
     @AppStorage("playbox.player.verticalGestures") private var verticalGesturesEnabled = true
     @StateObject private var subtitleController = SubtitleOverlayController()
     @StateObject private var gestureController = PlaybackGestureController()
     @State private var player = AVPlayer()
-    @State private var observer: Any?
     @State private var statusObserver: NSKeyValueObservation?
     @State private var failureObserver: NSObjectProtocol?
+    @State private var endedObserver: NSObjectProtocol?
     @State private var errorMessage: String?
     @State private var isLoading = true
-    @State private var currentProgress: Double = 0
-    @State private var currentSpeed: Double = 0
+    @State private var isRebuffering = false
+    @State private var isPreparingResume = false
+    @State private var hasBegunPlayback = false
+    @State private var hasEnded = false
+    @State private var bufferedSeconds: Double = 0
     @State private var playbackSeconds: Double = 0
-    @State private var lastLoaded: Int64 = 0
-    @State private var lastSpeedUpdate: Date = Date()
+    @State private var lastReportedAt: Date = .distantPast
+    @State private var lastStoredAt: Date = .distantPast
     @State private var progressTask: Task<Void, Never>?
+    @State private var resumeTask: Task<Void, Never>?
 
     @ViewBuilder
     var body: some View {
@@ -31,7 +41,12 @@ struct TrackedPlayerView: View {
                 url: url,
                 item: item,
                 subtitles: subtitles,
-                selectedSubtitle: selectedSubtitle
+                selectedSubtitle: selectedSubtitle,
+                bufferedProgress: bufferedProgress,
+                playbackDiagnostics: playbackDiagnostics,
+                onPlaybackPosition: onPlaybackPosition,
+                prepareSeek: prepareSeek,
+                onPlaybackEvent: onPlaybackEvent
             )
         } else {
             directPlayer
@@ -45,6 +60,7 @@ struct TrackedPlayerView: View {
 
     private var directPlayer: some View {
         ZStack {
+            Color.black.ignoresSafeArea()
             GeometryReader { proxy in
                 VideoPlayer(player: player)
                     .ignoresSafeArea()
@@ -72,11 +88,18 @@ struct TrackedPlayerView: View {
 
             VStack {
                 HStack {
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark")
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                            .background(.black.opacity(0.58), in: Circle())
+                    }
+                    .accessibilityLabel("Close player")
                     Spacer()
                     ccMenu
-                        .padding(.trailing, 18)
-                        .padding(.top, 12)
                 }
+                .padding(.horizontal, 18)
+                .padding(.top, 12)
 
                 Spacer()
 
@@ -91,69 +114,47 @@ struct TrackedPlayerView: View {
                         .background(.black.opacity(0.42), in: RoundedRectangle(cornerRadius: 8))
                         .padding(.horizontal, 24)
                         .padding(.bottom, 54)
+                        .allowsHitTesting(false)
                 }
             }
 
             PlaybackGestureHUD(controller: gestureController)
 
-            if isLoading && errorMessage == nil {
-                VStack(spacing: 18) {
-                    ZStack {
-                        Circle()
-                            .stroke(Color.white.opacity(0.2), lineWidth: 8)
-                            .frame(width: 126, height: 126)
-
-                        Circle()
-                            .trim(from: 0, to: max(0.01, min(currentProgress, 1.0)))
-                            .stroke(
-                                AngularGradient(
-                                    gradient: Gradient(colors: [.blue, .cyan, .white]),
-                                    center: .center
-                                ),
-                                style: StrokeStyle(lineWidth: 8, lineCap: .round)
-                            )
-                            .frame(width: 126, height: 126)
-                            .rotationEffect(.degrees(-90))
-                            .animation(.linear(duration: 0.12), value: currentProgress)
-
-                        VStack(spacing: 6) {
-                            Text(String(format: "%.2f%%", currentProgress * 100))
-                                .font(.system(size: 24, weight: .bold, design: .rounded))
-                                .monospacedDigit()
-                            Text("Loading")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    HStack(spacing: 8) {
-                        Image(systemName: "arrow.down")
-                            .font(.system(size: 12, weight: .semibold))
-                        Text(formatSpeed(currentSpeed))
-                            .font(.system(size: 13, weight: .medium))
+            if (isLoading || isRebuffering || isPreparingResume), errorMessage == nil {
+                VStack(spacing: 12) {
+                    ProgressView(isPreparingResume ? "Resuming video…" : (isRebuffering ? "Buffering video…" : "Opening video…"))
+                        .tint(.white)
+                    if bufferedSeconds > 0 {
+                        Text("\(Int(bufferedSeconds)) seconds ready to play")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.8))
                             .monospacedDigit()
                     }
-                    .foregroundStyle(.white.opacity(0.9))
                 }
+                .foregroundStyle(.white)
                 .padding(22)
-                .background(.ultraThinMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 26))
+                .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 18))
+                .allowsHitTesting(false)
             }
 
             if let errorMessage {
                 VStack(spacing: 14) {
-                    ContentUnavailableView(
-                        "Playback failed",
-                        systemImage: "exclamationmark.triangle",
-                        description: Text(errorMessage)
-                    )
+                    Image(systemName: "exclamationmark.triangle").font(.largeTitle)
+                    Text("Playback failed").font(.headline)
+                    Text(errorMessage)
+                        .font(.subheadline)
+                        .multilineTextAlignment(.center)
                     Button("Try Again") { Task { await startPlayback() } }
                         .buttonStyle(.borderedProminent)
+                    Button("Close") { dismiss() }.buttonStyle(.bordered)
                 }
-                .padding()
-                .background(.ultraThinMaterial)
+                .foregroundStyle(.white)
+                .padding(24)
+                .background(.black.opacity(0.88), in: RoundedRectangle(cornerRadius: 18))
+                .padding(24)
             }
         }
+        .preferredColorScheme(.dark)
     }
 
     @ViewBuilder
@@ -185,7 +186,7 @@ struct TrackedPlayerView: View {
             Image(systemName: "captions.bubble.fill")
                 .font(.title3)
                 .foregroundStyle(.white)
-                .padding(10)
+                .frame(width: 44, height: 44)
                 .background(.black.opacity(0.58), in: Circle())
         }
         .disabled(subtitles.isEmpty)
@@ -198,11 +199,15 @@ struct TrackedPlayerView: View {
         cleanupCurrentItem()
         errorMessage = nil
         isLoading = true
-        currentProgress = 0
-        currentSpeed = 0
+        isRebuffering = false
+        isPreparingResume = false
+        hasBegunPlayback = false
+        hasEnded = false
+        bufferedSeconds = 0
         playbackSeconds = 0
-        lastLoaded = 0
-        lastSpeedUpdate = Date()
+        lastReportedAt = .distantPast
+        lastStoredAt = .distantPast
+        onPlaybackEvent?(.opening)
 
         let asset = AVURLAsset(url: url, options: [
             AVURLAssetAllowsCellularAccessKey: true,
@@ -211,22 +216,39 @@ struct TrackedPlayerView: View {
         ])
         let playerItem = AVPlayerItem(asset: asset)
         playerItem.preferredForwardBufferDuration = 8
+        player.replaceCurrentItem(with: playerItem)
 
         statusObserver = playerItem.observe(\.status, options: [.initial, .new]) { observed, _ in
             Task { @MainActor in
                 guard player.currentItem === observed else { return }
                 switch observed.status {
                 case .readyToPlay:
-                    isLoading = false
                     errorMessage = nil
                     let resume = library.position(for: item)
-                    if resume > 0, player.currentTime().seconds < 1 {
-                        await player.seek(to: CMTime(seconds: resume, preferredTimescale: 600))
+                    if resume > 1, player.currentTime().seconds < 1 {
+                        isPreparingResume = true
+                        resumeTask?.cancel()
+                        resumeTask = Task { @MainActor in
+                            let duration = observed.duration.seconds
+                            if duration.isFinite, duration > 0 {
+                                let target = min(max(resume / duration, 0), 0.999)
+                                onPlaybackEvent?(.seekRequested(target))
+                                let ready = await prepareSeek?(target) ?? true
+                                guard !Task.isCancelled, player.currentItem === observed else { return }
+                                if ready {
+                                    await player.seek(to: CMTime(seconds: target * duration, preferredTimescale: 600))
+                                    guard !Task.isCancelled, player.currentItem === observed else { return }
+                                    onPlaybackEvent?(.seekReady(target))
+                                }
+                            }
+                            isPreparingResume = false
+                            player.play()
+                        }
+                    } else {
+                        player.play()
                     }
-                    player.play()
                 case .failed:
-                    isLoading = false
-                    errorMessage = friendlyMessage(for: observed.error)
+                    reportFailure(friendlyMessage(for: observed.error))
                 case .unknown:
                     break
                 @unknown default:
@@ -241,75 +263,96 @@ struct TrackedPlayerView: View {
             queue: .main
         ) { note in
             Task { @MainActor in
+                guard player.currentItem === playerItem else { return }
                 let error = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
-                errorMessage = friendlyMessage(for: error)
-                isLoading = false
+                reportFailure(friendlyMessage(for: error))
             }
         }
-
-        player.replaceCurrentItem(with: playerItem)
-        observer = player.addPeriodicTimeObserver(
-            forInterval: CMTime(seconds: 2, preferredTimescale: 600),
+        endedObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: playerItem,
             queue: .main
-        ) { time in
+        ) { _ in
             Task { @MainActor in
-                let duration = CMTimeGetSeconds(player.currentItem?.duration ?? .invalid)
-                library.updatePlayback(item, position: CMTimeGetSeconds(time), duration: duration)
+                guard player.currentItem === playerItem else { return }
+                hasEnded = true
+                isRebuffering = false
+                onPlaybackEvent?(.ended)
             }
         }
 
         startProgressMonitor(playerItem)
-        player.play()
-
-        try? await Task.sleep(for: .seconds(20))
-        if player.currentItem === playerItem, playerItem.status == .unknown {
-            isLoading = false
-            errorMessage = "The stream did not start within 20 seconds. The server may be unavailable or the media format may not be supported."
-        }
+        // The ready observer starts playback after applying the saved position.
     }
 
+    @MainActor
     private func startProgressMonitor(_ playerItem: AVPlayerItem) {
         progressTask?.cancel()
-        progressTask = Task {
-            while !Task.isCancelled {
-                let ranges = playerItem.loadedTimeRanges
-                let loaded = ranges.reduce(Int64(0)) { total, range in
-                    total + Int64(range.timeRangeValue.duration.value)
-                }
-
-                let duration = playerItem.duration
-                let progress = duration.value > 0 ? Double(loaded) / Double(duration.value) : 0
+        progressTask = Task { @MainActor in
+            let beganAt = Date()
+            var lastSeconds: Double = 0
+            while !Task.isCancelled, player.currentItem === playerItem {
                 let seconds = player.currentTime().seconds
-
-                await MainActor.run {
-                    playbackSeconds = seconds.isFinite ? max(0, seconds) : 0
-
-                    let now = Date()
-                    let delta = now.timeIntervalSince(lastSpeedUpdate)
-                    if delta >= 0.1 {
-                        let bytesDelta = loaded - lastLoaded
-                        let speed = delta > 0 ? Double(bytesDelta) / delta : 0
-                        currentSpeed = speed
-                        lastLoaded = loaded
-                        lastSpeedUpdate = now
-                    }
-                    currentProgress = min(max(progress, 0), 1)
+                playbackSeconds = seconds.isFinite ? max(0, seconds) : 0
+                bufferedSeconds = playerItem.loadedTimeRanges.reduce(0) { longest, range in
+                    let start = range.timeRangeValue.start.seconds
+                    let end = CMTimeRangeGetEnd(range.timeRangeValue).seconds
+                    guard start.isFinite, end.isFinite,
+                          start <= playbackSeconds + 0.1, end >= playbackSeconds else { return longest }
+                    return max(longest, end - playbackSeconds)
                 }
 
-                try? await Task.sleep(nanoseconds: 100_000_000)
+                if !isPreparingResume, errorMessage == nil, !hasEnded {
+                    let advancing = player.timeControlStatus == .playing && playbackSeconds > lastSeconds + 0.01
+                    if advancing {
+                        isLoading = false
+                        if !hasBegunPlayback {
+                            hasBegunPlayback = true
+                            onPlaybackEvent?(.firstFrame)
+                        }
+                        if isRebuffering {
+                            isRebuffering = false
+                            onPlaybackEvent?(.resumed)
+                        }
+                    } else if hasBegunPlayback,
+                              player.timeControlStatus == .waitingToPlayAtSpecifiedRate,
+                              !isRebuffering {
+                        isRebuffering = true
+                        onPlaybackEvent?(.stalled)
+                    }
+                }
+                lastSeconds = playbackSeconds
+
+                let duration = playerItem.duration.seconds
+                let now = Date()
+                if hasBegunPlayback, !isPreparingResume,
+                   duration.isFinite, duration > 0, playbackSeconds.isFinite {
+                    if player.timeControlStatus == .playing, now.timeIntervalSince(lastReportedAt) >= 1 {
+                        lastReportedAt = now
+                        onPlaybackPosition?(playbackSeconds, duration)
+                    }
+                    if now.timeIntervalSince(lastStoredAt) >= 2 {
+                        lastStoredAt = now
+                        library.updatePlayback(item, position: playbackSeconds, duration: duration)
+                    }
+                }
+                if now.timeIntervalSince(beganAt) > 20, playerItem.status == .unknown, errorMessage == nil {
+                    reportFailure("The stream did not open within 20 seconds. Try another source or retry.")
+                }
+
+                do { try await Task.sleep(for: .milliseconds(250)) }
+                catch { break }
             }
         }
     }
 
-    private func formatSpeed(_ value: Double) -> String {
-        let units = ["B/s", "KB/s", "MB/s", "GB/s"]
-        var current = value
-        var index = 0
-        while current >= 1024 && index < units.count - 1 {
-            current /= 1024
-            index += 1
-        }
-        return String(format: "%.2f %@", current, units[index])
+    @MainActor
+    private func reportFailure(_ message: String) {
+        guard errorMessage == nil else { return }
+        errorMessage = message
+        isLoading = false
+        isRebuffering = false
+        onPlaybackEvent?(.failed(message))
     }
 
     @MainActor
@@ -328,19 +371,26 @@ struct TrackedPlayerView: View {
     @MainActor
     private func cleanupCurrentItem() {
         player.pause()
-        if let observer { player.removeTimeObserver(observer) }
-        observer = nil
         statusObserver?.invalidate()
         statusObserver = nil
         if let failureObserver { NotificationCenter.default.removeObserver(failureObserver) }
         failureObserver = nil
+        if let endedObserver { NotificationCenter.default.removeObserver(endedObserver) }
+        endedObserver = nil
         progressTask?.cancel()
         progressTask = nil
+        resumeTask?.cancel()
+        resumeTask = nil
+        player.currentItem?.cancelPendingSeeks()
         player.replaceCurrentItem(with: nil)
     }
 
     @MainActor
     private func stopPlayback() {
+        let duration = player.currentItem?.duration.seconds ?? 0
+        if hasBegunPlayback, !isPreparingResume, duration.isFinite, duration > 0 {
+            library.updatePlayback(item, position: playbackSeconds, duration: duration)
+        }
         cleanupCurrentItem()
     }
 }
