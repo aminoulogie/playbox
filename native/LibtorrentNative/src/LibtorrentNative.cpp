@@ -1317,7 +1317,7 @@ public:
                 std::lock_guard<std::mutex> guard(lock_);
                 jobs_[request.job_id] = std::move(state);
             }
-            emit_progress(request.job_id, handle, false);
+            emit_progress(request.job_id, handle);
             return 0;
         } catch (const std::exception &error) {
             return fail(error.what());
@@ -1595,7 +1595,7 @@ private:
         const auto status = handle.status();
         for (const auto &job_id : job_ids) {
             emit_stream_ready_if_possible(job_id, handle, status);
-            emit_progress(job_id, handle, true, &status);
+            emit_progress(job_id, handle, &status);
         }
     }
 
@@ -1844,7 +1844,7 @@ private:
                     maintain_streaming_priorities(iterator->second.handle, iterator->second, status);
                 }
                 emit_stream_ready_if_possible(job_id, handle, status);
-                emit_progress(job_id, handle, false, &status);
+                emit_progress(job_id, handle, &status);
             }
         }
     }
@@ -1939,7 +1939,6 @@ private:
     void emit_progress(
         const std::string &job_id,
         const lt::torrent_handle &handle,
-        bool force_completed,
         const lt::torrent_status *status_snapshot = nullptr
     ) {
         if (callback_ == nullptr || !handle.is_valid()) {
@@ -1947,7 +1946,31 @@ private:
         }
 
         const auto status = status_snapshot == nullptr ? handle.status() : *status_snapshot;
-        const bool completed = force_completed || status.is_finished;
+        std::optional<int> completion_primary;
+        {
+            std::lock_guard<std::mutex> guard(lock_);
+            const auto iterator = jobs_.find(job_id);
+            if (iterator == jobs_.end()) {
+                return;
+            }
+            if (!iterator->second.pending_selection.has_value()) {
+                completion_primary = iterator->second.primary_file_index;
+            }
+        }
+        bool completed = false;
+        if (status.is_finished && status.total_wanted > 0 && completion_primary.has_value()) {
+            if (const auto info = handle.torrent_file()) {
+                const auto &files = info->files();
+                const int primary = *completion_primary;
+                if (primary >= 0 && primary < files.num_files()) {
+                    const auto size = files.file_size(lt::file_index_t{primary});
+                    // is_finished can mean zero wanted files or a previous
+                    // asynchronous selection. Require the actual primary data.
+                    completed = size > 0 &&
+                        contiguous_file_bytes(handle, primary, status) >= size;
+                }
+            }
+        }
         if (completed) {
             std::lock_guard<std::mutex> guard(lock_);
             const auto iterator = jobs_.find(job_id);
