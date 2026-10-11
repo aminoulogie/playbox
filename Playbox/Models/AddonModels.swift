@@ -261,6 +261,47 @@ struct AddonStream: Codable, Identifiable, Hashable {
         return "\(sourceText[valueRange]) \(sourceText[unitRange].uppercased())"
     }
 
+    // Add-ons such as Torrentio include swarm counts in their title text.
+    // A missing count stays unknown; it is never treated as a live peer count.
+    private static let seederPatterns = [
+        try! NSRegularExpression(pattern: #"(?:👤|👥|🌱)\s*([0-9][0-9,.]*\s*[kKmM]?)"#),
+        try! NSRegularExpression(
+            pattern: #"\b(?:seeders?|seeds?)\s*[:=]?\s*([0-9][0-9,.]*\s*[kKmM]?)\b"#,
+            options: [.caseInsensitive]
+        )
+    ]
+
+    var seederCount: Int? {
+        for text in [title, name].compactMap({ $0 }) {
+            let fullRange = NSRange(text.startIndex..., in: text)
+            for pattern in Self.seederPatterns {
+                guard let match = pattern.firstMatch(in: text, range: fullRange),
+                      let range = Range(match.range(at: 1), in: text) else { continue }
+
+                let value = String(text[range])
+                    .replacingOccurrences(of: " ", with: "")
+                    .lowercased()
+                let suffix = value.last
+                let multiplier: Double
+                switch suffix {
+                case "k": multiplier = 1_000
+                case "m": multiplier = 1_000_000
+                default: multiplier = 1
+                }
+
+                let digits = multiplier == 1 ? value : String(value.dropLast())
+                let normalized = multiplier == 1
+                    ? digits.replacingOccurrences(of: #"[,.]"#, with: "", options: .regularExpression)
+                    : digits.replacingOccurrences(of: ",", with: "")
+                if let number = Double(normalized), number.isFinite,
+                   let count = Int(exactly: (number * multiplier).rounded()) {
+                    return count
+                }
+            }
+        }
+        return nil
+    }
+
     var sourceSummary: String {
         [quality, codec, dynamicRange, fileSize].compactMap { $0 }.joined(separator: " · ")
     }
