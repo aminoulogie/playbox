@@ -31,6 +31,9 @@ public struct LibtorrentJobInput: Sendable, Equatable, Codable {
     public let torrentFileName: String?
     public let downloadDirectory: URL
     public let rateLimits: LibtorrentRateLimits?
+    /// Fetch metadata and connect peers without downloading file data.
+    /// A later job for the same torrent adopts the warm handle.
+    public let prewarm: Bool
 
     public init(
         jobId: UUID,
@@ -38,7 +41,8 @@ public struct LibtorrentJobInput: Sendable, Equatable, Codable {
         torrentData: Data? = nil,
         torrentFileName: String? = nil,
         downloadDirectory: URL,
-        rateLimits: LibtorrentRateLimits? = nil
+        rateLimits: LibtorrentRateLimits? = nil,
+        prewarm: Bool = false
     ) {
         self.jobId = jobId
         self.magnetUri = magnetUri
@@ -46,6 +50,7 @@ public struct LibtorrentJobInput: Sendable, Equatable, Codable {
         self.torrentFileName = torrentFileName
         self.downloadDirectory = downloadDirectory
         self.rateLimits = rateLimits
+        self.prewarm = prewarm
     }
 }
 
@@ -379,6 +384,10 @@ public extension LibtorrentSession {
 }
 
 public enum LibtorrentSessionFactory {
+    /// One long-lived session keeps the DHT routing table, port mappings and
+    /// peer connections warm across Play taps. Created lazily and thread-safely.
+    public static let shared: any LibtorrentSession = makeDefault()
+
     public static func makeDefault() -> any LibtorrentSession {
         #if canImport(Darwin)
             if let nativeSession = try? NativeLibtorrentSession() {

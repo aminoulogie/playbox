@@ -1,3 +1,27 @@
+# Performance update — 2026-10-12 (branch claude/playbox-performance-optimization-7nyhrv)
+
+Goal: faster time-to-first-frame for torrents, faster launch, smoother UI.
+
+Torrent startup:
+- One shared, long-lived libtorrent session (`LibtorrentSessionFactory.shared`), created in the background at app launch so the DHT is warm before the first Play. Previously every Play created and bootstrapped a new session.
+- Prewarm: when sources load, the Quick Play torrent is added as a `prewarm` job (metadata + peer connections, all files `dont_download`). Starting Play/Download for the same info hash adopts the warm handle natively. A prewarm never touches a torrent another job already runs. Cancelled when leaving the detail page.
+- Settings: announce to all trackers/tiers, faster connects (connection_speed 100, connect boost 60, 7 s timeouts), deeper request queues, close_redundant_connections off, non-strict end game.
+- Adaptive startup buffer: 256 KiB at >= 1 MiB/s, 512 KiB default, 1 MiB under 200 KiB/s (MP4 tail metadata still required). Seek readiness uses the same target.
+- Piece deadlines are cleared only when the playhead anchor moves, not every time the frontier advances; the first 4 pieces past the frontier are due immediately.
+- Native progress events every 100 ms (was 250 ms). Metadata reannounce every 6 s (was 15 s).
+- VLC file/network caching 300 ms (was 1000/2500 ms).
+- Quick Play picks via `AddonStream.fastestStart`: seeders (log scale), prefers 1080p/720p, penalises files over 6 GB and AV1.
+
+UI:
+- Minimal startup and buffering overlay: spinner, %, download speed · downloaded data (100 ms updates). Live stats are leaf views observing `TorrentEngine`, so the player is not rebuilt 10×/s.
+- Posters: `ImagePipeline`/`CachedImage` memory + disk cache with ImageIO downsampling.
+- Launch: add-on manifests cached and refreshed concurrently; Discover rows cached on disk and shown instantly; Discover no longer reloads when navigating back or clearing search.
+- Detail: stream lists ranked once per load (regex ranking was running on every render); play progress no longer re-renders the hidden list.
+
+Needs on-device validation: time to first frame vs v1.0.7x, early stalls with the smaller buffer, prewarm adoption, and battery/heat with the aggressive connection settings.
+
+---
+
 # Current source update — 2026-10-11
 
 The notes below describe earlier releases. Current baseline before this update was v1.0.76, which added reported seeder sorting.

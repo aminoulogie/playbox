@@ -1,13 +1,16 @@
 import SwiftUI
 
 struct TorrentPlaybackView: View {
-    @ObservedObject var engine: TorrentEngine
+    // Not observed here: live stats re-render only the leaf views that read
+    // them, so the player and its video surface are not rebuilt every 100 ms.
+    let engine: TorrentEngine
     let item: MetaPreview
     let subtitles: [AddonSubtitle]
     let selectedSubtitle: AddonSubtitle?
 
     @Environment(\.dismiss) private var dismiss
     @State private var streamURL: URL?
+    @State private var failureMessage: String?
 
     var body: some View {
         ZStack {
@@ -19,83 +22,28 @@ struct TorrentPlaybackView: View {
                     item: item,
                     subtitles: subtitles,
                     selectedSubtitle: selectedSubtitle,
-                    bufferedProgress: engine.bufferedProgress,
-                    playbackDiagnostics: engine.playbackDiagnostics,
-                    onPlaybackPosition: { seconds, duration in
+                    torrentEngine: engine,
+                    onPlaybackPosition: { [engine] seconds, duration in
                         engine.reportPlaybackPosition(seconds: seconds, duration: duration)
                     },
-                    prepareSeek: { position in
+                    prepareSeek: { [engine] position in
                         await engine.prepareSeek(to: position)
                     },
-                    onPlaybackEvent: { event in
+                    onPlaybackEvent: { [engine] event in
                         engine.recordPlaybackEvent(event)
                     }
                 )
                 .ignoresSafeArea()
             } else {
-                VStack(spacing: 11) {
-                    if case .failed = engine.state {
-                        Image(systemName: "exclamationmark.triangle")
-                            .font(.system(size: 44))
-                            .foregroundStyle(.orange)
-                            .padding(.bottom, 2)
-                    } else {
-                        SegmentedLoadingSpinner()
-                            .frame(width: 68, height: 68)
-                            .padding(.bottom, 2)
-                    }
-
-                    Text("Cache loading")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.78))
-
-                    Text(String(format: "%.2f%%", engine.cacheProgress * 100))
-                        .font(.system(size: 27, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                        .contentTransition(.numericText())
-                        .foregroundStyle(.white)
-
-                    Text(formatSpeed(engine.downloadSpeed))
-                        .font(.system(size: 14, weight: .medium))
-                        .monospacedDigit()
-                        .contentTransition(.numericText())
-                        .foregroundStyle(.white.opacity(0.9))
-
-                    Text(statusTitle)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.76))
-
-                    Text("Downloaded: \(String(format: "%.2f", engine.progress * 100))% · \(engine.peerCount) peers")
-                        .font(.system(size: 13))
-                        .monospacedDigit()
-                        .contentTransition(.numericText())
-                        .foregroundStyle(.white.opacity(0.84))
-
-                    Text(engine.diagnosticText)
-                        .font(.system(size: 10.5))
-                        .multilineTextAlignment(.center)
-                        .foregroundStyle(.white.opacity(0.56))
-                        .lineLimit(4)
-                        .frame(maxWidth: 350)
-                        .padding(.top, 3)
-
-                    Button("Close") {
-                        dismiss()
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.white)
-                    .font(.system(size: 14, weight: .medium))
-                    .padding(.top, 5)
-                }
-                .padding(.horizontal, 24)
+                TorrentStartupView(engine: engine) { dismiss() }
             }
         }
         .overlay {
-            if streamURL != nil, case .failed(let message) = engine.state {
+            if streamURL != nil, let failureMessage {
                 VStack(spacing: 14) {
                     Image(systemName: "exclamationmark.triangle").font(.largeTitle)
                     Text("Torrent source stopped").font(.headline)
-                    Text(message).font(.subheadline).multilineTextAlignment(.center)
+                    Text(failureMessage).font(.subheadline).multilineTextAlignment(.center)
                     Button("Choose another source") { dismiss() }
                         .buttonStyle(.borderedProminent)
                 }
@@ -105,64 +53,15 @@ struct TorrentPlaybackView: View {
                 .padding(24)
             }
         }
-        .onReceive(engine.$state) { state in
-            guard streamURL == nil else { return }
-            if case .ready(let url) = state {
+        .onReceive(engine.$state.removeDuplicates()) { state in
+            switch state {
+            case .ready(let url) where streamURL == nil:
                 streamURL = url
+            case .failed(let message):
+                failureMessage = message
+            default:
+                break
             }
         }
-    }
-
-    private func formatSpeed(_ bytesPerSecond: Double) -> String {
-        guard bytesPerSecond > 0 else { return "0 B/s" }
-        let formatter = ByteCountFormatter()
-        formatter.countStyle = .file
-        formatter.allowedUnits = [.useKB, .useMB, .useGB]
-        formatter.includesUnit = true
-        formatter.isAdaptive = true
-        return formatter.string(fromByteCount: Int64(bytesPerSecond)) + "/s"
-    }
-
-    private var statusTitle: String {
-        switch engine.state {
-        case .idle:
-            return "Preparing stream…"
-        case .resolving:
-            return "Finding torrent metadata…"
-        case .downloading:
-            return engine.cacheProgress >= 0.70
-                ? "Finalizing playback cache…"
-                : "Buffering video…"
-        case .ready:
-            return "Opening player…"
-        case .failed(let message):
-            return message
-        }
-    }
-}
-
-private struct SegmentedLoadingSpinner: View {
-    private let segmentCount = 12
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 0.04)) { context in
-            let phase = Int(context.date.timeIntervalSinceReferenceDate * 12.0) % segmentCount
-
-            ZStack {
-                ForEach(0..<segmentCount, id: \.self) { index in
-                    Capsule(style: .continuous)
-                        .fill(.white)
-                        .frame(width: 5.5, height: 16)
-                        .opacity(opacity(for: index, phase: phase))
-                        .offset(y: -22)
-                        .rotationEffect(.degrees(Double(index) * 360.0 / Double(segmentCount)))
-                }
-            }
-        }
-    }
-
-    private func opacity(for index: Int, phase: Int) -> Double {
-        let distance = (index - phase + segmentCount) % segmentCount
-        return max(0.12, 1.0 - Double(distance) * 0.075)
     }
 }

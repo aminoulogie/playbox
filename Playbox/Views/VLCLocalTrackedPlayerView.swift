@@ -9,6 +9,7 @@ struct VLCLocalTrackedPlayerView: View {
     let selectedSubtitle: AddonSubtitle?
     var bufferedProgress: Double? = nil
     var playbackDiagnostics: String? = nil
+    var torrentEngine: TorrentEngine? = nil
     var onPlaybackPosition: ((Double, Double) -> Void)? = nil
     var prepareSeek: ((Double) async -> Bool)? = nil
     var onPlaybackEvent: ((PlaybackMetricEvent) -> Void)? = nil
@@ -100,13 +101,22 @@ struct VLCLocalTrackedPlayerView: View {
             PlaybackGestureHUD(controller: gestureController)
 
             if controller.errorMessage == nil, let status = controller.statusText {
-                ProgressView(status)
-                    .tint(.white)
-                    .foregroundStyle(.white)
-                    .padding(18)
-                    .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 16))
-                    .allowsHitTesting(false)
-                    .accessibilityLabel(status)
+                VStack(spacing: 10) {
+                    LoadingSpinner()
+                        .frame(width: 44, height: 44)
+                    if let torrentEngine {
+                        TorrentSpeedLine(
+                            engine: torrentEngine,
+                            font: .system(size: 14, weight: .semibold, design: .rounded)
+                        )
+                    }
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 14)
+                .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 16))
+                .allowsHitTesting(false)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(status)
             }
 
             if let message = controller.errorMessage {
@@ -140,12 +150,16 @@ struct VLCLocalTrackedPlayerView: View {
                         Text("State: \(controller.stateText)")
                         Text("Position: \(controller.currentTimeText) / \(controller.durationText)")
                         Text("Playback speed: \(String(format: "%g", controller.playbackRate))×")
-                        if let progress = bufferedProgress {
-                            Text("Estimated buffer position: \(Int(min(max(progress, 0), 1) * 100))%")
-                        }
-                        if let playbackDiagnostics {
-                            Text(playbackDiagnostics)
-                                .font(.system(.body, design: .monospaced))
+                        if let torrentEngine {
+                            TorrentDiagnosticsText(engine: torrentEngine)
+                        } else {
+                            if let progress = bufferedProgress {
+                                Text("Estimated buffer position: \(Int(min(max(progress, 0), 1) * 100))%")
+                            }
+                            if let playbackDiagnostics {
+                                Text(playbackDiagnostics)
+                                    .font(.system(.body, design: .monospaced))
+                            }
                         }
                         if let error = controller.errorMessage ?? controller.seekError {
                             Text(error).foregroundStyle(.orange)
@@ -226,11 +240,10 @@ struct VLCLocalTrackedPlayerView: View {
             .accessibilityLabel("Playback position")
             .accessibilityValue("\(controller.currentTimeText) of \(controller.durationText)")
 
-            if let progress = bufferedProgress {
-                ProgressView(value: min(max(progress, 0), 1))
-                    .tint(.white.opacity(0.6))
-                    .accessibilityLabel("Estimated buffer position")
-                    .accessibilityValue("\(Int(min(max(progress, 0), 1) * 100)) percent")
+            if let torrentEngine {
+                TorrentBufferBar(engine: torrentEngine)
+            } else if let progress = bufferedProgress {
+                BufferBar(progress: progress)
             }
 
             HStack {
@@ -494,8 +507,9 @@ final class VLCTorrentPlayerController: NSObject, ObservableObject {
             fail("VLC could not open this video. Try another source.")
             return
         }
-        // Retain existing caches until device timing can guide tuning.
-        media.addOptions(["file-caching": 1000, "network-caching": 2500])
+        // libtorrent already gates startup on verified contiguous data, so VLC
+        // only needs a short read-ahead before the first frame.
+        media.addOptions(["file-caching": 300, "network-caching": 300])
         player.media = media
         player.play()
         player.rate = Float(playbackRate)

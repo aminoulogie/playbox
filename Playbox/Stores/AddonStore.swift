@@ -2,7 +2,7 @@ import Foundation
 
 @MainActor
 final class AddonStore: ObservableObject {
-    struct InstalledAddon: Identifiable {
+    struct InstalledAddon: Identifiable, Codable {
         var id: String { manifest.id }
         let baseURL: URL
         let manifest: AddonManifest
@@ -28,16 +28,50 @@ final class AddonStore: ObservableObject {
     @Published var installingURL: String?
     private let client = AddonClient()
     private let storageKey = "playbox.addons.urls"
+    private let manifestCacheKey = "playbox.addons.manifestCache"
 
     init() {
-        Task {
-            let urls = UserDefaults.standard.stringArray(forKey: storageKey) ?? []
-            if urls.isEmpty {
-                await install(Self.featured[0].manifestURL)
-            } else {
-                for url in urls { await install(url) }
+        // Show the last known add-ons immediately; refresh them in the background.
+        if let data = UserDefaults.standard.data(forKey: manifestCacheKey),
+           let cached = try? JSONDecoder().decode([InstalledAddon].self, from: data) {
+            addons = cached
+        }
+        Task { await refreshInstalled() }
+    }
+
+    /// Re-fetches every manifest concurrently, keeping the stored order.
+    private func refreshInstalled() async {
+        let urls = UserDefaults.standard.stringArray(forKey: storageKey) ?? []
+        guard !urls.isEmpty else {
+            await install(Self.featured[0].manifestURL)
+            return
+        }
+        let client = client
+        let bases = urls.compactMap { URL(string: baseURLString($0)) }
+        let fetched = await withTaskGroup(of: (Int, AddonManifest?).self) { group in
+            for (index, base) in bases.enumerated() {
+                group.addTask { (index, try? await client.manifest(baseURL: base)) }
+            }
+            var results: [Int: AddonManifest] = [:]
+            for await (index, manifest) in group {
+                if let manifest { results[index] = manifest }
+            }
+            return results
+        }
+        var refreshed: [InstalledAddon] = []
+        for (index, base) in bases.enumerated() {
+            if let manifest = fetched[index] {
+                refreshed.append(.init(baseURL: base, manifest: manifest))
+            } else if let cached = addons.first(where: { $0.baseURL == base }) {
+                refreshed.append(cached)
             }
         }
+        // The user installed or removed an add-on while this was running.
+        guard urls == (UserDefaults.standard.stringArray(forKey: storageKey) ?? []) else { return }
+        var seen = Set<String>()
+        refreshed = refreshed.filter { seen.insert($0.manifest.id).inserted }
+        addons = refreshed
+        persist()
     }
 
     func isInstalled(_ featured: FeaturedAddon) -> Bool {
@@ -72,6 +106,9 @@ final class AddonStore: ObservableObject {
 
     private func persist() {
         UserDefaults.standard.set(addons.map { $0.baseURL.absoluteString }, forKey: storageKey)
+        if let data = try? JSONEncoder().encode(addons) {
+            UserDefaults.standard.set(data, forKey: manifestCacheKey)
+        }
     }
 
     private func baseURLString(_ input: String) -> String {

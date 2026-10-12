@@ -84,6 +84,7 @@ struct StartRequest {
     std::optional<long long> download_rate_limit;
     std::optional<long long> upload_rate_limit;
     std::optional<FileSelection> selection;
+    bool prewarm = false;
 };
 
 struct JobState {
@@ -95,6 +96,10 @@ struct JobState {
     std::string download_directory;
     bool completed_sent = false;
     bool stream_ready_sent = false;
+    // Prewarm jobs fetch metadata and keep peers connected without
+    // downloading file data. A later Play job for the same torrent adopts them.
+    bool prewarm = false;
+    bool prewarm_files_blocked = false;
     std::optional<double> playback_position;
     bool playback_priorities_initialized = false;
     int streaming_anchor_piece = -1;
@@ -720,6 +725,7 @@ StartRequest parse_start_request(const char *json) {
     request.download_rate_limit = extract_json_int(request_json, "downloadBytesPerSecond");
     request.upload_rate_limit = extract_json_int(request_json, "uploadBytesPerSecond");
     request.selection = parse_file_selection(request_json);
+    request.prewarm = extract_json_bool(request_json, "prewarm").value_or(false);
     return request;
 }
 
@@ -750,6 +756,30 @@ lt::settings_pack make_settings() {
     settings.set_bool(lt::settings_pack::piece_extent_affinity, true);
     settings.set_int(lt::settings_pack::max_web_seed_connections, 12);
     settings.set_int(lt::settings_pack::urlseed_pipeline_size, 10);
+
+    // Streaming-first tuning: reach many peers quickly, drop slow ones fast,
+    // and keep deep request queues so the playhead pieces arrive sooner.
+    settings.set_bool(lt::settings_pack::announce_to_all_trackers, true);
+    settings.set_bool(lt::settings_pack::announce_to_all_tiers, true);
+    settings.set_bool(lt::settings_pack::smooth_connects, false);
+    settings.set_bool(lt::settings_pack::close_redundant_connections, false);
+    settings.set_bool(lt::settings_pack::strict_end_game_mode, false);
+    settings.set_int(lt::settings_pack::connections_limit, 400);
+    settings.set_int(lt::settings_pack::connection_speed, 100);
+    settings.set_int(lt::settings_pack::torrent_connect_boost, 60);
+    settings.set_int(lt::settings_pack::peer_connect_timeout, 7);
+    settings.set_int(lt::settings_pack::handshake_timeout, 7);
+    settings.set_int(lt::settings_pack::min_reconnect_time, 5);
+    settings.set_int(lt::settings_pack::request_timeout, 10);
+    settings.set_int(lt::settings_pack::piece_timeout, 10);
+    settings.set_int(lt::settings_pack::request_queue_time, 2);
+    settings.set_int(lt::settings_pack::max_out_request_queue, 1500);
+    settings.set_int(lt::settings_pack::max_allowed_in_request_queue, 2000);
+    settings.set_int(lt::settings_pack::max_peerlist_size, 4000);
+    settings.set_int(lt::settings_pack::min_announce_interval, 30);
+    settings.set_int(lt::settings_pack::dht_announce_interval, 60);
+    settings.set_int(lt::settings_pack::active_downloads, 8);
+    settings.set_int(lt::settings_pack::active_limit, 16);
     return settings;
 }
 
@@ -1015,6 +1045,23 @@ bool file_needs_tail_metadata(const std::string &path) {
     return ext == "mp4" || ext == "m4v" || ext == "mov";
 }
 
+constexpr std::int64_t kStartupBufferFloor = 256LL * 1024LL;
+constexpr std::int64_t kStartupBufferDefault = 512LL * 1024LL;
+constexpr std::int64_t kStartupBufferCeiling = 1024LL * 1024LL;
+constexpr std::int64_t kContainerMetadataBytes = 1024LL * 1024LL;
+
+// Fast swarms start almost immediately; slow ones wait for a larger head so
+// VLC does not stall right after the first frame.
+std::int64_t startup_buffer_target(std::int64_t file_size, int payload_bytes_per_second) {
+    std::int64_t target = kStartupBufferDefault;
+    if (payload_bytes_per_second >= 1024 * 1024) {
+        target = kStartupBufferFloor;
+    } else if (payload_bytes_per_second < 200 * 1024) {
+        target = kStartupBufferCeiling;
+    }
+    return std::max<std::int64_t>(0, std::min(file_size, target));
+}
+
 void invalidate_streaming_priorities(JobState &state) {
     state.playback_priorities_initialized = false;
     state.streaming_anchor_piece = -1;
@@ -1074,17 +1121,20 @@ void maintain_streaming_priorities(
             }
         }
     };
-    add_range(frontier, window_last, 250, 250);
+    // The first pieces past the frontier are due almost immediately so the
+    // time-critical picker requests them from the fastest peers first.
+    add_range(frontier, std::min(window_last, frontier + 3), 0, 50);
+    add_range(frontier, window_last, 200, 150);
     if (following_playback) {
         // Decoder seeks may read the keyframe immediately before the target.
         add_range(lookbehind_first, anchor, 100, 20);
         // Keep the startup header available after a seek away from the start.
-        const auto head_end = file_offset + std::min<std::int64_t>(size, 1LL * 1024LL * 1024LL) - 1;
+        const auto head_end = file_offset + std::min<std::int64_t>(size, kContainerMetadataBytes) - 1;
         const int head_last = static_cast<int>(head_end / piece_length);
         add_range(span->first, head_last, 25, 20);
     }
     if (file_needs_tail_metadata(files.file_path(index))) {
-        const auto tail_start = file_offset + std::max<std::int64_t>(0, size - (1LL * 1024LL * 1024LL));
+        const auto tail_start = file_offset + std::max<std::int64_t>(0, size - kContainerMetadataBytes);
         add_range(static_cast<int>(tail_start / piece_length), span->second, 25, 20);
     }
     std::sort(priorities.begin(), priorities.end());
@@ -1133,10 +1183,9 @@ void maintain_streaming_priorities(
         deadline_pieces.push_back(piece);
     }
     std::sort(deadline_pieces.begin(), deadline_pieces.end());
-    const bool window_changed =
-        state.streaming_anchor_piece != anchor ||
-        state.streaming_window_first != frontier ||
-        state.streaming_window_last != window_last;
+    // Only a playhead jump invalidates every deadline. The frontier advancing
+    // as pieces arrive must not cancel in-flight time-critical requests.
+    const bool window_changed = state.streaming_anchor_piece != anchor;
     if (window_changed) {
         // Seek deadlines from the previous position must not compete with the
         // new position. Head/tail requirements are reapplied below.
@@ -1289,16 +1338,33 @@ public:
             const bool awaiting_selection = !request.selection.has_value()
                 && params.ti
                 && params.ti->num_files() > 1;
-            if (awaiting_selection) {
-                params.file_priorities.assign(
-                    static_cast<std::size_t>(params.ti->num_files()),
-                    lt::dont_download
-                );
+            if (awaiting_selection || request.prewarm) {
+                // Magnets have no file count yet; libtorrent trims the vector
+                // to the real count once metadata arrives.
+                const std::size_t count = params.ti
+                    ? static_cast<std::size_t>(params.ti->num_files())
+                    : 4096;
+                params.file_priorities.assign(count, lt::dont_download);
             }
-            lt::error_code error;
-            auto handle = session_.add_torrent(std::move(params), error);
-            if (error) {
-                return fail("failed to add torrent: " + error.message());
+
+            // A prewarm for a torrent that is already running has nothing to do,
+            // and must never lower the running job's file priorities.
+            if (request.prewarm && torrent_exists(params.info_hashes, params.ti)) {
+                return 0;
+            }
+
+            // Reuse a prewarmed (or still running) torrent with the same info
+            // hash: its metadata, DHT state and peer connections are already warm.
+            lt::torrent_handle handle = adopt_existing_torrent(params.info_hashes, params.ti);
+            if (!handle.is_valid()) {
+                lt::error_code error;
+                handle = session_.add_torrent(std::move(params), error);
+                if (error) {
+                    return fail("failed to add torrent: " + error.message());
+                }
+            } else if (!request.prewarm) {
+                handle.resume();
+                handle.force_dht_announce();
             }
             apply_rate_limits(handle, request);
             auto pending_selection = request.selection;
@@ -1310,6 +1376,7 @@ public:
                 JobState state;
                 state.job_id = request.job_id;
                 state.handle = handle;
+                state.prewarm = request.prewarm;
                 state.pending_selection = pending_selection;
                 state.file_selection_applied = request.selection.has_value() && !pending_selection.has_value();
                 state.download_directory = request.download_directory;
@@ -1320,7 +1387,9 @@ public:
                 std::lock_guard<std::mutex> guard(lock_);
                 jobs_[request.job_id] = std::move(state);
             }
-            emit_progress(request.job_id, handle);
+            if (!request.prewarm) {
+                emit_progress(request.job_id, handle);
+            }
             return 0;
         } catch (const std::exception &error) {
             return fail(error.what());
@@ -1423,6 +1492,12 @@ public:
             }
             handle = iterator->second.handle;
             jobs_.erase(iterator);
+            // An adopted torrent may still back another job.
+            for (const auto &[_, other] : jobs_) {
+                if (other.handle == handle) {
+                    return 0;
+                }
+            }
         }
 
         if (handle.is_valid()) {
@@ -1437,6 +1512,62 @@ public:
     }
 
 private:
+    bool torrent_exists(
+        const lt::info_hash_t &hashes,
+        const std::shared_ptr<const lt::torrent_info> &info
+    ) const {
+        lt::info_hash_t lookup = hashes;
+        if (!lookup.has_v1() && !lookup.has_v2() && info) {
+            lookup = info->info_hashes();
+        }
+        return (lookup.has_v1() || lookup.has_v2())
+            && session_.find_torrent(lookup.get_best()).is_valid();
+    }
+
+    lt::torrent_handle adopt_existing_torrent(
+        const lt::info_hash_t &hashes,
+        const std::shared_ptr<const lt::torrent_info> &info
+    ) {
+        lt::info_hash_t lookup = hashes;
+        if (!lookup.has_v1() && !lookup.has_v2() && info) {
+            lookup = info->info_hashes();
+        }
+        if (!lookup.has_v1() && !lookup.has_v2()) {
+            return {};
+        }
+        auto existing = session_.find_torrent(lookup.get_best());
+        if (!existing.is_valid()) {
+            return {};
+        }
+
+        std::lock_guard<std::mutex> guard(lock_);
+        for (auto iterator = jobs_.begin(); iterator != jobs_.end();) {
+            if (iterator->second.handle == existing && iterator->second.prewarm) {
+                iterator = jobs_.erase(iterator);
+            } else {
+                ++iterator;
+            }
+        }
+        // A non-prewarm job still owns this torrent; adding again would fail
+        // with a duplicate error, so share the handle.
+        return existing;
+    }
+
+    void block_prewarm_file_data(JobState &state) {
+        if (state.prewarm_files_blocked || !state.handle.is_valid()) {
+            return;
+        }
+        const auto info = state.handle.torrent_file();
+        if (!info) {
+            return;
+        }
+        state.handle.prioritize_files(std::vector<lt::download_priority_t>(
+            static_cast<std::size_t>(info->num_files()),
+            lt::dont_download
+        ));
+        state.prewarm_files_blocked = true;
+    }
+
     template <typename Operation>
     int with_handle(const char *json, Operation operation) {
         const auto job_id = parse_job_id(json);
@@ -1818,11 +1949,15 @@ private:
             {
                 std::lock_guard<std::mutex> guard(lock_);
                 for (auto &[job_id, state] : jobs_) {
+                    if (state.prewarm) {
+                        block_prewarm_file_data(state);
+                        continue;
+                    }
                     if (state.completed_sent && !state.progress_dirty) {
                         continue;
                     }
                     const bool due = !state.last_progress_poll.has_value() ||
-                        now - *state.last_progress_poll >= std::chrono::milliseconds(250);
+                        now - *state.last_progress_poll >= std::chrono::milliseconds(100);
                     if (!due && !state.progress_dirty) {
                         continue;
                     }
@@ -1893,9 +2028,9 @@ private:
         const lt::file_index_t index{file_index};
         const auto file_size = files.file_size(index);
         const auto available = contiguous_file_bytes(handle, file_index, status);
-        const std::int64_t startup_target = std::min<std::int64_t>(
+        const std::int64_t startup_target = startup_buffer_target(
             file_size,
-            1LL * 1024LL * 1024LL
+            status.download_payload_rate
         );
 
         const std::string relative_path = files.file_path(index);
@@ -1903,7 +2038,7 @@ private:
         const bool tail_ready = !tail_required || tail_ready_for_container(
             handle,
             file_index,
-            1LL * 1024LL * 1024LL,
+            kContainerMetadataBytes,
             status
         );
 
@@ -2026,14 +2161,14 @@ private:
                         if (playback_position.has_value() && file_size > 0) {
                             const auto offset = playback_byte_offset(file_size, *playback_position);
                             playback_buffered_bytes = contiguous_file_bytes(handle, primary, status, offset);
-                            playback_buffer_target_bytes = std::min<std::int64_t>(
+                            playback_buffer_target_bytes = startup_buffer_target(
                                 file_size - offset,
-                                1LL * 1024LL * 1024LL
+                                status.download_payload_rate
                             );
                         }
-                        streaming_buffer_target_bytes = std::min<std::int64_t>(
+                        streaming_buffer_target_bytes = startup_buffer_target(
                             file_size,
-                            1LL * 1024LL * 1024LL
+                            status.download_payload_rate
                         );
 
                         const double head_progress = streaming_buffer_target_bytes > 0
@@ -2050,7 +2185,7 @@ private:
                             const double tail_progress = tail_download_progress(
                                 handle,
                                 primary,
-                                1LL * 1024LL * 1024LL,
+                                kContainerMetadataBytes,
                                 status
                             );
                             streaming_ready_percent =

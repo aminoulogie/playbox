@@ -8,6 +8,8 @@ struct TrackedPlayerView: View {
     let selectedSubtitle: AddonSubtitle?
     var bufferedProgress: Double? = nil
     var playbackDiagnostics: String? = nil
+    /// Live torrent stats for the buffering badge, buffer bar and diagnostics.
+    var torrentEngine: TorrentEngine? = nil
     var onPlaybackPosition: ((Double, Double) -> Void)? = nil
     var prepareSeek: ((Double) async -> Bool)? = nil
     var onPlaybackEvent: ((PlaybackMetricEvent) -> Void)? = nil
@@ -51,6 +53,7 @@ struct TrackedPlayerView: View {
                 selectedSubtitle: selectedSubtitle,
                 bufferedProgress: bufferedProgress,
                 playbackDiagnostics: playbackDiagnostics,
+                torrentEngine: torrentEngine,
                 onPlaybackPosition: onPlaybackPosition,
                 prepareSeek: prepareSeek,
                 onPlaybackEvent: onPlaybackEvent

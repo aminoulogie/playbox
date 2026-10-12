@@ -1,6 +1,6 @@
 import SwiftUI
 
-private struct CatalogSection: Identifiable {
+private struct CatalogSection: Identifiable, Codable {
     let id: String
     let title: String
     let items: [MetaPreview]
@@ -11,7 +11,9 @@ struct CatalogView: View {
     @AppStorage("playbox.library.posterColumns") private var posterColumns = 4
     @AppStorage("playbox.library.posterSizingMode") private var posterSizingMode = "columns"
     @AppStorage("playbox.library.posterWidth") private var posterWidth = 135.0
-    @State private var sections: [CatalogSection] = []
+    @State private var discover: [CatalogSection] = []
+    @State private var searchResults: [CatalogSection]?
+    @State private var hasLoaded = false
     @State private var loading = false
     @State private var errorMessage: String?
     @State private var searchText = ""
@@ -33,10 +35,45 @@ struct CatalogView: View {
         .searchable(text: $searchText, prompt: "Movies and series")
         .onSubmit(of: .search) { Task { await search() } }
         .onChange(of: searchText) { _, value in
-            if value.isEmpty { Task { await load() } }
+            // Discover stays in memory; clearing search restores it instantly.
+            if value.isEmpty { searchResults = nil; errorMessage = nil }
+        }
+        .onChange(of: store.addons.map(\.id)) { old, new in
+            if hasLoaded, old != new { Task { await load() } }
         }
         .navigationDestination(for: MetaPreview.self) { DetailView(item: $0) }
-        .task { await load() }
+        .task {
+            // Runs on every appearance; only the first one loads.
+            guard !hasLoaded else { return }
+            hasLoaded = true
+            if discover.isEmpty, let cached = await Self.readCache() {
+                discover = cached
+            }
+            await load()
+        }
+    }
+
+    private var sections: [CatalogSection] { searchResults ?? discover }
+
+    private static var cacheURL: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("discover-v1.json")
+    }
+
+    private static func readCache() async -> [CatalogSection]? {
+        let url = cacheURL
+        return await Task.detached(priority: .userInitiated) {
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            return try? JSONDecoder().decode([CatalogSection].self, from: data)
+        }.value
+    }
+
+    private static func writeCache(_ sections: [CatalogSection]) {
+        let url = cacheURL
+        Task.detached(priority: .utility) {
+            guard let data = try? JSONEncoder().encode(sections) else { return }
+            try? data.write(to: url, options: .atomic)
+        }
     }
 
     private func catalogContent(layout: PosterLayout) -> some View {
@@ -53,9 +90,9 @@ struct CatalogView: View {
                         if searchText.isEmpty, let hero = sections.first?.items.first {
                             NavigationLink(value: hero) {
                                 ZStack(alignment: .bottomLeading) {
-                                    AsyncImage(url: hero.poster.flatMap(URL.init(string:))) { image in
-                                        image.resizable().scaledToFill()
-                                    } placeholder: { Rectangle().fill(.gray.opacity(0.2)) }
+                                    CachedImage(url: hero.poster.flatMap(URL.init(string:)), maxPoints: 600) {
+                                        Rectangle().fill(.gray.opacity(0.2))
+                                    }
                                     .frame(height: 330).clipped()
 
                                     LinearGradient(
@@ -90,9 +127,7 @@ struct CatalogView: View {
                                             NavigationLink(value: item) {
                                                 VStack(alignment: .leading, spacing: 6) {
                                                     ZStack(alignment: .topTrailing) {
-                                                        AsyncImage(url: item.poster.flatMap(URL.init(string:))) { image in
-                                                            image.resizable().scaledToFill()
-                                                        } placeholder: {
+                                                        CachedImage(url: item.poster.flatMap(URL.init(string:)), maxPoints: layout.height) {
                                                             Rectangle().fill(.gray.opacity(0.2))
                                                                 .overlay { Image(systemName: "film").foregroundStyle(.secondary) }
                                                         }
@@ -138,7 +173,7 @@ struct CatalogView: View {
         async let movies = try? AddonClient().search(baseURL: cinemeta, type: "movie", query: query)
         async let series = try? AddonClient().search(baseURL: cinemeta, type: "series", query: query)
         let combined = (await movies ?? []) + (await series ?? [])
-        sections = combined.isEmpty ? [] : [CatalogSection(id: "search", title: "Search Results", items: combined)]
+        searchResults = combined.isEmpty ? [] : [CatalogSection(id: "search", title: "Search Results", items: combined)]
         errorMessage = combined.isEmpty ? "No matching movies or series were found." : nil
     }
 
@@ -164,11 +199,20 @@ struct CatalogView: View {
                     return (index, items)
                 }
             }
+            let showProgressively = discover.isEmpty
             for await (index, items) in group where items?.isEmpty == false {
                 results.append(CatalogSection(id: String(index), title: sources[index].0, items: items!))
+                // First launch without a cache: show rows as soon as each arrives.
+                if showProgressively {
+                    discover = results.sorted { (Int($0.id) ?? 0) < (Int($1.id) ?? 0) }
+                }
             }
         }
-        sections = results.sorted { (Int($0.id) ?? 0) < (Int($1.id) ?? 0) }
-        errorMessage = sections.isEmpty ? "No catalog data was returned. Check your connection." : nil
+        let sorted = results.sorted { (Int($0.id) ?? 0) < (Int($1.id) ?? 0) }
+        if !sorted.isEmpty {
+            discover = sorted
+            Self.writeCache(sorted)
+        }
+        errorMessage = discover.isEmpty ? "No catalog data was returned. Check your connection." : nil
     }
 }

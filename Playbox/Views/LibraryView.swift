@@ -75,9 +75,7 @@ struct LibraryView: View {
 
     private func posterCard(_ entry: LibraryStore.Entry, showsProgress: Bool, layout: PosterLayout) -> some View {
         VStack(alignment: .leading, spacing: layout.compact ? 3 : 7) {
-            AsyncImage(url: entry.poster.flatMap(URL.init(string:))) { image in
-                image.resizable().scaledToFill()
-            } placeholder: {
+            CachedImage(url: entry.poster.flatMap(URL.init(string:)), maxPoints: layout.height) {
                 Rectangle().fill(.gray.opacity(0.2))
                     .overlay {
                         Image(systemName: "film")

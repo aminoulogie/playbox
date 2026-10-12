@@ -252,10 +252,11 @@ struct AddonStream: Codable, Identifiable, Hashable {
         return nil
     }
 
+    private static let fileSizePattern = try! NSRegularExpression(pattern: #"(?i)(\d+(?:\.\d+)?)\s*(GB|MB)"#)
+
     var fileSize: String? {
-        let pattern = #"(?i)(\d+(?:\.\d+)?)\s*(GB|MB)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(in: sourceText, range: NSRange(sourceText.startIndex..., in: sourceText)),
+        let regex = Self.fileSizePattern
+        guard let match = regex.firstMatch(in: sourceText, range: NSRange(sourceText.startIndex..., in: sourceText)),
               let valueRange = Range(match.range(at: 1), in: sourceText),
               let unitRange = Range(match.range(at: 2), in: sourceText) else { return nil }
         return "\(sourceText[valueRange]) \(sourceText[unitRange].uppercased())"
@@ -301,6 +302,40 @@ struct AddonStream: Codable, Identifiable, Hashable {
             }
         }
         return nil
+    }
+
+    /// Size reported in the add-on title, in gigabytes.
+    var fileSizeGigabytes: Double? {
+        let text = sourceText
+        guard let match = Self.fileSizePattern.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              let valueRange = Range(match.range(at: 1), in: text),
+              let unitRange = Range(match.range(at: 2), in: text),
+              let value = Double(text[valueRange]) else { return nil }
+        return text[unitRange].uppercased() == "MB" ? value / 1024 : value
+    }
+
+    /// Picks the torrent most likely to start quickly: well seeded, 1080p or
+    /// 720p preferred, and very large files (4K remuxes) penalised.
+    static func fastestStart(in torrents: [AddonStream]) -> AddonStream? {
+        let ranked = torrents.map { stream -> (AddonStream, Double) in
+            let seeders = Double(max(stream.seederCount ?? 0, 0))
+            var score = log2(seeders + 1) * 10
+            switch stream.quality {
+            case "1080p": score += 8
+            case "720p": score += 5
+            case "4K": score += 1
+            default: score += 2
+            }
+            if let size = stream.fileSizeGigabytes, size > 6 {
+                score -= (size - 6) * 1.5
+            }
+            if stream.codec == "AV1" { score -= 4 }
+            return (stream, score)
+        }
+        // Keep a sparse swarm from winning on quality alone.
+        let best = ranked.map { $0.0.seederCount ?? 0 }.max() ?? 0
+        let viable = ranked.filter { ($0.0.seederCount ?? 0) >= min(5, best) }
+        return (viable.isEmpty ? ranked : viable).max { $0.1 < $1.1 }?.0
     }
 
     var sourceSummary: String {

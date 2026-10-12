@@ -14,6 +14,8 @@ final class TorrentEngine: ObservableObject {
     @Published private(set) var progress: Double = 0.0
     @Published private(set) var peerCount: Int = 0
     @Published private(set) var downloadSpeed: Double = 0
+    /// Bytes of the selected video file already on disk.
+    @Published private(set) var downloadedBytes: Int64 = 0
     @Published private(set) var cacheProgress: Double = 0
     @Published private(set) var bufferedBytes: Int64 = 0
     @Published private(set) var bufferTargetBytes: Int64 = 0
@@ -74,7 +76,9 @@ final class TorrentEngine: ObservableObject {
             return
         }
 
-        let nativeSession = LibtorrentSessionFactory.makeDefault()
+        // The shared session keeps DHT and peers warm, and adopts a torrent
+        // prewarmed from the detail page.
+        let nativeSession = LibtorrentSessionFactory.shared
         let jobID = UUID()
 
         session = nativeSession
@@ -145,7 +149,7 @@ final class TorrentEngine: ObservableObject {
                             )
                         } else {
                             let now = Date()
-                            if now.timeIntervalSince(lastDiscoveryRefreshAt) >= 15 {
+                            if now.timeIntervalSince(lastDiscoveryRefreshAt) >= 6 {
                                 lastDiscoveryRefreshAt = now
                                 try? await nativeSession.reannounce(jobId: jobID)
                                 try? await nativeSession.refreshPeers(jobId: jobID)
@@ -260,6 +264,7 @@ final class TorrentEngine: ObservableObject {
         progress = 0
         peerCount = 0
         downloadSpeed = 0
+        downloadedBytes = 0
         cacheProgress = 0
         bufferedBytes = 0
         bufferTargetBytes = 0
@@ -397,6 +402,7 @@ final class TorrentEngine: ObservableObject {
 
     private func resetPlaybackMeasurements() {
         operationStartedAt = Date()
+        downloadedBytes = 0
         streamingURL = nil
         completedFile = false
         selectedFileSize = 0
@@ -475,6 +481,9 @@ final class TorrentEngine: ObservableObject {
 
         if let file = selectedVideoFile(in: snapshot.files) {
             selectedFileSize = max(0, file.sizeBytes ?? 0)
+            downloadedBytes = max(0, file.bytesCompleted)
+        } else {
+            downloadedBytes = max(0, snapshot.bytesCompleted)
         }
         nativePlaybackPosition = snapshot.playbackPosition
         nativePlaybackBufferedBytes = max(0, snapshot.playbackBufferedBytes ?? 0)

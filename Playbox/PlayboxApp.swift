@@ -12,6 +12,9 @@ struct PlayboxApp: App {
                 .environmentObject(store)
                 .environmentObject(library)
                 .environmentObject(downloads)
+                // Bootstrap the DHT while the user browses, so the first
+                // Play does not start from a cold torrent session.
+                .task { TorrentPrewarmer.warmUpSession() }
         }
     }
 }

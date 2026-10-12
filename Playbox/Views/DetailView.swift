@@ -8,6 +8,11 @@ struct DetailView: View {
 
     @State private var metadata: MetaPreview?
     @State private var streams: [AddonStream] = []
+    // Derived once per source load; regex-based ranking is too costly per render.
+    @State private var playableStreams: [AddonStream] = []
+    @State private var torrentStreams: [AddonStream] = []
+    @State private var unsupportedStreams: [AddonStream] = []
+    @State private var quickPlayStream: AddonStream?
     @State private var subtitles: [AddonSubtitle] = []
     @State private var selectedSubtitle: AddonSubtitle?
     @State private var playerURL: PlayableURL?
@@ -73,15 +78,14 @@ struct DetailView: View {
         }
         .onDisappear {
             cancelActiveTorrent()
+            TorrentPrewarmer.shared.cancel()
         }
     }
 
     private var header: some View {
         Section {
             HStack(alignment: .top, spacing: 16) {
-                AsyncImage(url: posterURL) { image in
-                    image.resizable().scaledToFill()
-                } placeholder: { Rectangle().fill(.gray.opacity(0.2)) }
+                CachedImage(url: posterURL, maxPoints: 165) { Rectangle().fill(.gray.opacity(0.2)) }
                 .frame(width: 110, height: 165).clipped()
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 VStack(alignment: .leading, spacing: 8) {
@@ -111,7 +115,7 @@ struct DetailView: View {
                 .onChange(of: selectedSeason) {
                     cancelActiveTorrent()
                     selectedEpisodeID = nil
-                    streams = []
+                    setStreams([])
                     subtitles = []
                 }
 
@@ -122,9 +126,7 @@ struct DetailView: View {
                         Task { await loadMedia(id: episode.id) }
                     } label: {
                         HStack(spacing: 12) {
-                            AsyncImage(url: episode.thumbnail.flatMap(URL.init(string:))) { image in
-                                image.resizable().scaledToFill()
-                            } placeholder: {
+                            CachedImage(url: episode.thumbnail.flatMap(URL.init(string:)), maxPoints: 120) {
                                 ZStack { Rectangle().fill(.gray.opacity(0.18)); Image(systemName: "tv") }
                             }
                             .frame(width: 120, height: 68).clipped()
@@ -164,17 +166,26 @@ struct DetailView: View {
         }
     }
 
-    private var playableStreams: [AddonStream] { streams.filter { $0.playableURL != nil } }
-    private var torrentStreams: [AddonStream] {
-        streams.filter { $0.isTorrent }.sorted {
-            let left = $0.seederCount ?? -1
-            let right = $1.seederCount ?? -1
-            if left != right { return left > right }
-            if $0.qualityRank != $1.qualityRank { return $0.qualityRank > $1.qualityRank }
-            return $0.id < $1.id
+    @MainActor
+    private func setStreams(_ value: [AddonStream]) {
+        streams = value
+        playableStreams = value.filter { $0.playableURL != nil }
+        let torrents = value.filter { $0.isTorrent }.map { ($0, $0.seederCount ?? -1) }
+        torrentStreams = torrents.sorted {
+            if $0.1 != $1.1 { return $0.1 > $1.1 }
+            if $0.0.qualityRank != $1.0.qualityRank { return $0.0.qualityRank > $1.0.qualityRank }
+            return $0.0.id < $1.0.id
+        }.map(\.0)
+        unsupportedStreams = value.filter { $0.playableURL == nil && !$0.isTorrent }
+        quickPlayStream = playableStreams.first ?? AddonStream.fastestStart(in: torrentStreams)
+
+        if let quickPlayStream, quickPlayStream.playableURL == nil,
+           let magnet = quickPlayStream.torrentMagnetURI {
+            TorrentPrewarmer.shared.prewarm(magnet: magnet)
+        } else if !value.isEmpty {
+            TorrentPrewarmer.shared.cancel()
         }
     }
-    private var unsupportedStreams: [AddonStream] { streams.filter { $0.playableURL == nil && !$0.isTorrent } }
 
     private var sources: some View {
         Section(selectedEpisodeID == nil && item.type == "series" ? "Sources" : "Play") {
@@ -190,7 +201,7 @@ struct DetailView: View {
 
             if !isLoadingSources,
                !(item.type == "series" && selectedEpisodeID == nil),
-               let preferred = playableStreams.first ?? torrentStreams.first {
+               let preferred = quickPlayStream {
                 Button {
                     if let url = preferred.playableURL {
                         playerURL = PlayableURL(
@@ -216,7 +227,7 @@ struct DetailView: View {
                     }
                 }
                 .disabled(activeTorrentID != nil)
-                .accessibilityHint("Uses a direct stream when available, otherwise the highest ranked torrent.")
+                .accessibilityHint("Uses a direct stream when available, otherwise the well-seeded torrent most likely to start fastest.")
             }
 
             ForEach(playableStreams) { stream in
@@ -479,21 +490,23 @@ struct DetailView: View {
         videos.filter { $0.season == selectedSeason }.sorted { ($0.episode ?? 0) < ($1.episode ?? 0) }
     }
 
+    @MainActor
     private func loadDetails() async {
         metadata = try? await AddonClient().meta(baseURL: cinemeta, type: item.type, id: item.id)
         if item.type == "series", let videos = metadata?.videos, let firstSeason = seasons(in: videos).first {
             selectedSeason = firstSeason
             selectedEpisodeID = nil
-            streams = []
+            setStreams([])
             subtitles = []
             return
         }
         await loadMedia(id: item.id)
     }
 
+    @MainActor
     private func loadMedia(id: String) async {
         isLoadingSources = true
-        streams = []
+        setStreams([])
         subtitles = []
         selectedSubtitle = nil
         defer { isLoadingSources = false }
@@ -512,12 +525,12 @@ struct DetailView: View {
                 foundSubtitles += result.1
             }
         }
-        streams = Array(Set(foundStreams)).sorted {
+        setStreams(Array(Set(foundStreams)).sorted {
             if ($0.playableURL != nil) != ($1.playableURL != nil) { return $0.playableURL != nil }
             if $0.isTorrent != $1.isTorrent { return !$0.isTorrent }
             if $0.qualityRank != $1.qualityRank { return $0.qualityRank > $1.qualityRank }
             return $0.id < $1.id
-        }
+        })
         subtitles = Array(Set(foundSubtitles)).sorted { ($0.lang ?? "") < ($1.lang ?? "") }
     }
 
@@ -578,6 +591,12 @@ struct DetailView: View {
             streaming: action == .play
         ) { state, progress, peers, speed, cacheProgress, diagnostics in
             guard torrentOperationID == operationID else { return }
+            // While playing, the player sheet shows live stats from the engine.
+            // Only forward state changes so the list behind it does not re-render 10×/s.
+            if action == .play {
+                if torrentState != state { torrentState = state }
+                return
+            }
             torrentState = state
             torrentProgress = progress
             torrentPeerCount = peers
