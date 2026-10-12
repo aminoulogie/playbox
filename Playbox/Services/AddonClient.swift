@@ -17,6 +17,8 @@ struct AddonClient {
 
     /// Shared session: keeps HTTP/2 connections to add-ons alive between
     /// requests and honours add-on cache headers for catalogs and metadata.
+    /// Uses the system 60 s timeout: source add-ons such as Torrentio scrape
+    /// on demand and can take well over 15 s for new releases.
     static let session: URLSession = {
         let configuration = URLSessionConfiguration.default
         configuration.urlCache = URLCache(
@@ -24,7 +26,6 @@ struct AddonClient {
             diskCapacity: 128 * 1024 * 1024
         )
         configuration.requestCachePolicy = .useProtocolCachePolicy
-        configuration.timeoutIntervalForRequest = 15
         configuration.httpMaximumConnectionsPerHost = 8
         configuration.waitsForConnectivity = false
         return URLSession(configuration: configuration)
@@ -69,7 +70,8 @@ struct AddonClient {
         let value: SubtitleResponse = try await get(
             baseURL.appendingPathComponent("subtitles")
                 .appendingPathComponent(type)
-                .appendingPathComponent(id + ".json")
+                .appendingPathComponent(id + ".json"),
+            live: true
         )
         return value.subtitles
     }
@@ -78,13 +80,20 @@ struct AddonClient {
         let value: StreamResponse = try await get(
             baseURL.appendingPathComponent("stream")
                 .appendingPathComponent(type)
-                .appendingPathComponent(id + ".json")
+                .appendingPathComponent(id + ".json"),
+            live: true
         )
         return value.streams
     }
 
-    private func get<T: Decodable>(_ url: URL) async throws -> T {
-        let (data, response) = try await Self.session.data(from: url)
+    /// `live` requests (sources, subtitles) never use cached responses, so an
+    /// empty or partial result cannot hide sources that appear later.
+    private func get<T: Decodable>(_ url: URL, live: Bool = false) async throws -> T {
+        var request = URLRequest(url: url)
+        if live {
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+        }
+        let (data, response) = try await Self.session.data(for: request)
         guard let http = response as? HTTPURLResponse,
               200..<300 ~= http.statusCode else { throw AddonError.invalidResponse }
         return try decoder.decode(T.self, from: data)

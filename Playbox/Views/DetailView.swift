@@ -13,6 +13,7 @@ struct DetailView: View {
     @State private var torrentStreams: [AddonStream] = []
     @State private var unsupportedStreams: [AddonStream] = []
     @State private var quickPlayStream: AddonStream?
+    @State private var mediaLoadID = UUID()
     @State private var subtitles: [AddonSubtitle] = []
     @State private var selectedSubtitle: AddonSubtitle?
     @State private var playerURL: PlayableURL?
@@ -167,7 +168,7 @@ struct DetailView: View {
     }
 
     @MainActor
-    private func setStreams(_ value: [AddonStream]) {
+    private func setStreams(_ value: [AddonStream], prewarm: Bool = true) {
         streams = value
         playableStreams = value.filter { $0.playableURL != nil }
         let torrents = value.filter { $0.isTorrent }.map { ($0, $0.seederCount ?? -1) }
@@ -179,6 +180,7 @@ struct DetailView: View {
         unsupportedStreams = value.filter { $0.playableURL == nil && !$0.isTorrent }
         quickPlayStream = playableStreams.first ?? AddonStream.fastestStart(in: torrentStreams)
 
+        guard prewarm else { return }
         if let quickPlayStream, quickPlayStream.playableURL == nil,
            let magnet = quickPlayStream.torrentMagnetURI {
             TorrentPrewarmer.shared.prewarm(magnet: magnet)
@@ -191,12 +193,19 @@ struct DetailView: View {
         Section(selectedEpisodeID == nil && item.type == "series" ? "Sources" : "Play") {
             if item.type == "series" && selectedEpisodeID == nil {
                 ContentUnavailableView("Choose an episode", systemImage: "rectangle.stack", description: Text("Select an episode above to find its available sources."))
-            } else if isLoadingSources {
+            } else if isLoadingSources && streams.isEmpty {
                 HStack { Spacer(); ProgressView("Finding sources…"); Spacer() }
             } else if streams.isEmpty {
                 ContentUnavailableView("No sources", systemImage: "play.slash", description: Text("No installed add-on returned a source for this title."))
             } else if playableStreams.isEmpty && torrentStreams.isEmpty {
                 ContentUnavailableView("No playable source available", systemImage: "play.slash", description: Text("\(unsupportedStreams.count) source(s) were found, but they are not directly playable."))
+            }
+
+            if isLoadingSources && !streams.isEmpty {
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text("Finding more sources…").font(.caption).foregroundStyle(.secondary)
+                }
             }
 
             if !isLoadingSources,
@@ -505,33 +514,59 @@ struct DetailView: View {
 
     @MainActor
     private func loadMedia(id: String) async {
+        let loadID = UUID()
+        mediaLoadID = loadID
         isLoadingSources = true
         setStreams([])
         subtitles = []
         selectedSubtitle = nil
-        defer { isLoadingSources = false }
+        let addons = store.addons
+        let type = item.type
+
+        // Subtitles load independently so they never delay sources.
+        Task { @MainActor in
+            var found: [AddonSubtitle] = []
+            await withTaskGroup(of: [AddonSubtitle].self) { group in
+                for addon in addons {
+                    group.addTask {
+                        (try? await AddonClient().subtitles(baseURL: addon.baseURL, type: type, id: id)) ?? []
+                    }
+                }
+                for await result in group { found += result }
+            }
+            guard mediaLoadID == loadID else { return }
+            subtitles = Array(Set(found)).sorted { ($0.lang ?? "") < ($1.lang ?? "") }
+        }
+
+        // Show each add-on's sources as soon as it answers; one slow add-on
+        // no longer hides the others.
         var foundStreams: [AddonStream] = []
-        var foundSubtitles: [AddonSubtitle] = []
-        await withTaskGroup(of: ([AddonStream], [AddonSubtitle]).self) { group in
-            for addon in store.addons {
+        await withTaskGroup(of: [AddonStream].self) { group in
+            for addon in addons {
                 group.addTask {
-                    async let s = try? AddonClient().streams(baseURL: addon.baseURL, type: item.type, id: id)
-                    async let c = try? AddonClient().subtitles(baseURL: addon.baseURL, type: item.type, id: id)
-                    return (await s ?? [], await c ?? [])
+                    (try? await AddonClient().streams(baseURL: addon.baseURL, type: type, id: id)) ?? []
                 }
             }
             for await result in group {
-                foundStreams += result.0
-                foundSubtitles += result.1
+                guard mediaLoadID == loadID else { continue }
+                foundStreams += result
+                if !result.isEmpty {
+                    setStreams(Self.orderedStreams(foundStreams), prewarm: false)
+                }
             }
         }
-        setStreams(Array(Set(foundStreams)).sorted {
+        guard mediaLoadID == loadID else { return }
+        setStreams(Self.orderedStreams(foundStreams))
+        isLoadingSources = false
+    }
+
+    private static func orderedStreams(_ streams: [AddonStream]) -> [AddonStream] {
+        Array(Set(streams)).sorted {
             if ($0.playableURL != nil) != ($1.playableURL != nil) { return $0.playableURL != nil }
             if $0.isTorrent != $1.isTorrent { return !$0.isTorrent }
             if $0.qualityRank != $1.qualityRank { return $0.qualityRank > $1.qualityRank }
             return $0.id < $1.id
-        })
-        subtitles = Array(Set(foundSubtitles)).sorted { ($0.lang ?? "") < ($1.lang ?? "") }
+        }
     }
 
     @MainActor
