@@ -275,6 +275,9 @@ public struct LibtorrentProgress: Sendable, Equatable, Codable {
     public let totalBytes: Int64?
     public let percentComplete: Double?
     public let bytesPerSecond: Double?
+    /// Payload rate over the last second, sampled at every event (~15 Hz).
+    /// libtorrent's own `bytesPerSecond` only changes once per second.
+    public let liveBytesPerSecond: Double?
     public let totalBytesPerSecond: Double?
     public let protocolBytesPerSecond: Double?
     public let streamingBufferedBytes: Int64?
@@ -297,6 +300,7 @@ public struct LibtorrentProgress: Sendable, Equatable, Codable {
         totalBytes: Int64? = nil,
         percentComplete: Double? = nil,
         bytesPerSecond: Double? = nil,
+        liveBytesPerSecond: Double? = nil,
         totalBytesPerSecond: Double? = nil,
         protocolBytesPerSecond: Double? = nil,
         streamingBufferedBytes: Int64? = nil,
@@ -317,6 +321,7 @@ public struct LibtorrentProgress: Sendable, Equatable, Codable {
         self.totalBytes = totalBytes
         self.percentComplete = percentComplete
         self.bytesPerSecond = bytesPerSecond
+        self.liveBytesPerSecond = liveBytesPerSecond
         self.totalBytesPerSecond = totalBytesPerSecond
         self.protocolBytesPerSecond = protocolBytesPerSecond
         self.streamingBufferedBytes = streamingBufferedBytes

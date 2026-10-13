@@ -26,6 +26,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <cstdio>
+#include <deque>
 #include <iomanip>
 #include <limits>
 #include <memory>
@@ -109,6 +110,8 @@ struct JobState {
     std::vector<int> streaming_deadline_pieces;
     bool progress_dirty = true;
     std::optional<std::chrono::steady_clock::time_point> last_progress_poll;
+    // (time, total payload bytes received) samples for a live sliding-window rate.
+    std::deque<std::pair<std::chrono::steady_clock::time_point, std::int64_t>> rate_samples;
     struct SwarmEvents {
         struct Tracker {
             std::string last_event;
@@ -1250,7 +1253,9 @@ void emit_files_json(std::ostringstream &json, const lt::torrent_handle &handle)
 
     const auto &files = torrent_info->files();
     std::vector<std::int64_t> progress;
-    handle.file_progress(progress, lt::torrent_handle::piece_granularity);
+    // Block-level precision so the downloaded counter moves every 16 KiB
+    // instead of jumping once per verified piece.
+    handle.file_progress(progress);
     const auto priorities = handle.get_file_priorities();
 
     json << "[";
@@ -1512,6 +1517,31 @@ public:
     }
 
 private:
+    // Rate over the last second from the payload counter, which libtorrent
+    // updates on every received block (its own rate only updates each second).
+    double live_payload_rate(const std::string &job_id, std::int64_t total_payload) {
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> guard(lock_);
+        const auto iterator = jobs_.find(job_id);
+        if (iterator == jobs_.end()) {
+            return 0.0;
+        }
+        auto &samples = iterator->second.rate_samples;
+        if (!samples.empty() && total_payload < samples.back().second) {
+            samples.clear();
+        }
+        samples.emplace_back(now, total_payload);
+        const auto window = std::chrono::milliseconds(1000);
+        while (samples.size() > 2 && now - samples[1].first >= window) {
+            samples.pop_front();
+        }
+        const auto span = std::chrono::duration<double>(now - samples.front().first).count();
+        if (span < 0.2) {
+            return 0.0;
+        }
+        return static_cast<double>(total_payload - samples.front().second) / span;
+    }
+
     bool torrent_exists(
         const lt::info_hash_t &hashes,
         const std::shared_ptr<const lt::torrent_info> &info
@@ -1941,7 +1971,7 @@ private:
 
     void pump_progress() {
         while (!stopping_.load()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
             process_alerts();
 
             const auto now = std::chrono::steady_clock::now();
@@ -1957,7 +1987,7 @@ private:
                         continue;
                     }
                     const bool due = !state.last_progress_poll.has_value() ||
-                        now - *state.last_progress_poll >= std::chrono::milliseconds(100);
+                        now - *state.last_progress_poll >= std::chrono::milliseconds(66);
                     if (!due && !state.progress_dirty) {
                         continue;
                     }
@@ -2134,6 +2164,7 @@ private:
         json << "\"totalBytes\":" << status.total_wanted << ",";
         json << "\"percentComplete\":" << percent << ",";
         json << "\"bytesPerSecond\":" << status.download_payload_rate << ",";
+        json << "\"liveBytesPerSecond\":" << live_payload_rate(job_id, status.total_payload_download) << ",";
         json << "\"totalBytesPerSecond\":" << status.download_rate << ",";
         json << "\"protocolBytesPerSecond\":"
              << std::max(0, status.download_rate - status.download_payload_rate) << ",";

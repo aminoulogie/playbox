@@ -1,24 +1,22 @@
 import SwiftUI
 
 /// Small views that observe `TorrentEngine` directly. The engine publishes
-/// every 100 ms; keeping observation in these leaf views means only the stats
+/// ~15 times a second; keeping observation in these leaf views means only the stats
 /// re-render, not the player or its video surface.
 enum TorrentStatsFormat {
-    private static let byteFormatter: ByteCountFormatter = {
-        let formatter = ByteCountFormatter()
-        formatter.countStyle = .file
-        formatter.allowedUnits = [.useKB, .useMB, .useGB]
-        formatter.isAdaptive = true
-        return formatter
-    }()
-
+    // Fixed decimals so the digits tick visibly at ~15 updates per second,
+    // like a download manager, instead of ByteCountFormatter's rounding.
     static func bytes(_ value: Int64) -> String {
-        byteFormatter.string(fromByteCount: max(0, value))
+        let bytes = Double(max(0, value))
+        if bytes >= 1_000_000_000 { return String(format: "%.2f GB", bytes / 1_000_000_000) }
+        if bytes >= 1_000_000 { return String(format: "%.2f MB", bytes / 1_000_000) }
+        return String(format: "%.0f KB", bytes / 1_000)
     }
 
     static func speed(_ bytesPerSecond: Double) -> String {
         guard bytesPerSecond.isFinite, bytesPerSecond > 0 else { return "0 KB/s" }
-        return byteFormatter.string(fromByteCount: Int64(bytesPerSecond)) + "/s"
+        if bytesPerSecond >= 1_000_000 { return String(format: "%.2f MB/s", bytesPerSecond / 1_000_000) }
+        return String(format: "%.0f KB/s", bytesPerSecond / 1_000)
     }
 }
 
@@ -37,6 +35,7 @@ struct TorrentSpeedLine: View {
         .monospacedDigit()
         .foregroundStyle(.white)
         .lineLimit(1)
+        .transaction { $0.animation = nil }
         .accessibilityElement(children: .combine)
     }
 }

@@ -8,7 +8,7 @@ Torrent startup:
 - Settings: announce to all trackers/tiers, faster connects (connection_speed 100, connect boost 60, 7 s timeouts), deeper request queues, close_redundant_connections off, non-strict end game.
 - Adaptive startup buffer: 256 KiB at >= 1 MiB/s, 512 KiB default, 1 MiB under 200 KiB/s (MP4 tail metadata still required). Seek readiness uses the same target.
 - Piece deadlines are cleared only when the playhead anchor moves, not every time the frontier advances; the first 4 pieces past the frontier are due immediately.
-- Native progress events every 100 ms (was 250 ms). Metadata reannounce every 6 s (was 15 s).
+- Native progress events ~15 Hz (66 ms; was 250 ms) with a live 1 s sliding-window speed (`liveBytesPerSecond`) and block-level file progress. Metadata reannounce every 6 s (was 15 s).
 - VLC file/network caching 300 ms (was 1000/2500 ms).
 - Quick Play picks via `AddonStream.fastestStart`: seeders (log scale), prefers 1080p/720p, penalises files over 6 GB and AV1.
 

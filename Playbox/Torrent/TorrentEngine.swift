@@ -502,7 +502,7 @@ final class TorrentEngine: ObservableObject {
         let peers = snapshot.peerCount
             ?? snapshot.swarmDiagnostics?.connectedPeers
             ?? 0
-        let speed = max(0, snapshot.bytesPerSecond ?? 0)
+        let speed = max(0, snapshot.liveBytesPerSecond ?? snapshot.bytesPerSecond ?? 0)
         let buffered = max(0, snapshot.streamingBufferedBytes ?? 0)
         let target = max(0, snapshot.streamingBufferTargetBytes ?? 0)
         let headProgress = target > 0
